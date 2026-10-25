@@ -12,7 +12,8 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc            # X11 shared memory
   - --device=dri           # GPU rendering
-  # Deliberately absent: --filesystem=*, --share=network.
+  - --filesystem=home      # load widgets from their source path / save organized copies in Home or Documents
+  # Deliberately absent: --share=network.
   #  * Images are picked through the file chooser portal and copied into the app's own data folder.
   #  * "Start at login" goes through the Background portal (no access to ~/.config/autostart needed).
 

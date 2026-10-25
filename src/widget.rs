@@ -43,15 +43,15 @@ pub fn scaled_size(anim: &Anim, scale: f64) -> (i32, i32) {
 
 impl WidgetWindow {
     /// Show the widget inside a shared layer surface.
-    pub fn build_hosted(host: &Rc<LayerHost>, cfg: &WidgetConfig, anim: &Rc<Anim>) -> WidgetWindow {
-        host.upsert(cfg, anim);
+    pub fn build_hosted(host: &Rc<LayerHost>, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) -> WidgetWindow {
+        host.upsert(cfg, anim, mask);
         WidgetWindow { cfg: cfg.clone(), backing: Backing::Hosted(host.clone()), view: None }
     }
 
     /// Show the widget in its own window.
-    pub fn build_window(app: &adw::Application, env: &Env, cfg: &WidgetConfig, anim: &Rc<Anim>, on_closed: ClosedCb) -> WidgetWindow {
+    pub fn build_window(app: &adw::Application, env: &Env, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>, on_closed: ClosedCb) -> WidgetWindow {
         let (w, h) = scaled_size(anim, cfg.scale);
-        let view = AnimView::new(anim.clone(), w, h);
+        let view = AnimView::new(anim.clone(), w, h, mask);
         view.set_opacity(cfg.opacity);
         view.play();
 
@@ -106,6 +106,20 @@ impl WidgetWindow {
 
         window.present();
         WidgetWindow { cfg: cfg.clone(), backing: Backing::Window(window), view: Some(view) }
+    }
+
+    /// Show another picture (folder rotation) without rebuilding the window.
+    pub fn set_media(&self, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
+        match &self.backing {
+            Backing::Hosted(host) => host.replace_anim(&self.cfg, anim, mask),
+            Backing::Window(_) => {
+                if let Some(v) = &self.view {
+                    let (w, h) = scaled_size(anim, self.cfg.scale);
+                    v.set_anim(anim.clone(), w, h, mask);
+                    v.play();
+                }
+            }
+        }
     }
 
     pub fn host(&self) -> Option<&Rc<LayerHost>> {

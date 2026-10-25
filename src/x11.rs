@@ -18,7 +18,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use crate::model::Level;
+use crate::model::{Level, Win};
 
 struct Conn {
     conn: RustConnection,
@@ -30,6 +30,9 @@ struct Conn {
     skip_taskbar: u32,
     skip_pager: u32,
     frame_extents: u32,
+    client_list: u32,
+    hidden: u32,
+    gtk_app_id: u32,
 }
 
 impl Conn {
@@ -44,7 +47,10 @@ impl Conn {
         let skip_taskbar = atom("_NET_WM_STATE_SKIP_TASKBAR")?;
         let skip_pager = atom("_NET_WM_STATE_SKIP_PAGER")?;
         let frame_extents = atom("_NET_FRAME_EXTENTS")?;
-        Some(Conn { conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents })
+        let client_list = atom("_NET_CLIENT_LIST")?;
+        let hidden = atom("_NET_WM_STATE_HIDDEN")?;
+        let gtk_app_id = atom("_GTK_APPLICATION_ID")?;
+        Some(Conn { conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents, client_list, hidden, gtk_app_id })
     }
 
     /// Atoms that should be set for `level`.
@@ -143,4 +149,36 @@ pub fn position(xid: u32) -> Option<(i32, i32)> {
         Some((r.dst_x as i32 - left, r.dst_y as i32 - top))
     })
     .flatten()
+}
+
+/// Every top-level window of the session (except our own), for application rules.
+/// Empty when there is no X11 connection (Wayland offers no standard way to list windows).
+pub fn windows() -> Vec<Win> {
+    with_conn(|c| {
+        let prop = |win: u32, property: u32, ty: AtomEnum| {
+            c.conn.get_property(false, win, property, ty, 0, 1024).ok().and_then(|k| k.reply().ok()).map(|r| r.value).unwrap_or_default()
+        };
+        let list: Vec<u32> = c
+            .conn
+            .get_property(false, c.root, c.client_list, AtomEnum::WINDOW, 0, 4096)
+            .ok()
+            .and_then(|k| k.reply().ok())
+            .and_then(|r| r.value32().map(|v| v.collect()))
+            .unwrap_or_default();
+        list.into_iter()
+            .filter_map(|win| {
+                let text = |bytes: Vec<u8>| bytes.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).to_lowercase()).collect::<Vec<_>>();
+                let mut keys = text(prop(win, AtomEnum::WM_CLASS.into(), AtomEnum::STRING));
+                keys.extend(text(prop(win, c.gtk_app_id, AtomEnum::ANY)));
+                if keys.iter().any(|k| k == "gifdeck" || k == "dev.gifdeck.gifdeck") {
+                    return None;
+                }
+                let minimized = prop(win, c.net_wm_state, AtomEnum::ATOM)
+                    .chunks_exact(4)
+                    .any(|a| u32::from_ne_bytes([a[0], a[1], a[2], a[3]]) == c.hidden);
+                Some(Win { keys, minimized })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }

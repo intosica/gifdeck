@@ -45,6 +45,171 @@ impl Level {
     }
 }
 
+/// How a folder widget picks the file it shows.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RotMode {
+    /// Next file (natural name order) every `interval` seconds.
+    #[default]
+    Sequential,
+    /// Random file after a random delay between `min` and `max` seconds.
+    Random,
+    /// File chosen by time of day (`Rotation::schedule`).
+    Scheduled,
+}
+
+impl RotMode {
+    pub const ALL: [RotMode; 3] = [RotMode::Sequential, RotMode::Random, RotMode::Scheduled];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RotMode::Sequential => "Sequential (in file order)",
+            RotMode::Random => "Random",
+            RotMode::Scheduled => "Scheduled (by time of day)",
+        }
+    }
+
+    pub fn from_index(i: u32) -> RotMode {
+        RotMode::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u32 {
+        RotMode::ALL.iter().position(|m| *m == self).unwrap_or(0) as u32
+    }
+}
+
+/// "From this time of day on, show this file."
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct SchedEntry {
+    /// Minutes since midnight.
+    pub start: u16,
+    /// File name inside the widget's folder.
+    pub file: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct Rotation {
+    pub mode: RotMode,
+    /// Seconds (sequential).
+    pub interval: u32,
+    /// Seconds (random bounds).
+    pub min: u32,
+    pub max: u32,
+    pub schedule: Vec<SchedEntry>,
+}
+
+impl Default for Rotation {
+    fn default() -> Self {
+        Rotation { mode: RotMode::Sequential, interval: 60, min: 30, max: 300, schedule: Vec::new() }
+    }
+}
+
+impl Rotation {
+    /// Index into `files` the schedule selects at `minute` (last entry that started, wrapping over midnight).
+    pub fn scheduled_file<'a>(&self, files: &'a [PathBuf], minute: u16) -> Option<&'a PathBuf> {
+        let name_of = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut entries: Vec<&SchedEntry> = self.schedule.iter().collect();
+        entries.sort_by_key(|e| e.start);
+        let entry = entries.iter().rev().find(|e| e.start <= minute).or(entries.last())?;
+        files.iter().find(|f| name_of(f) == entry.file)
+    }
+}
+
+/// How a widget reacts to an application.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AppMode {
+    #[default]
+    Always,
+    /// Shown only while the application has a window.
+    OnlyWhenOpen,
+    /// Moves to the desktop layer while the application's window is showing.
+    MinimizeWhenOpen,
+}
+
+impl AppMode {
+    pub const ALL: [AppMode; 3] = [AppMode::Always, AppMode::OnlyWhenOpen, AppMode::MinimizeWhenOpen];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AppMode::Always => "Always",
+            AppMode::OnlyWhenOpen => "Only when the application is open",
+            AppMode::MinimizeWhenOpen => "Minimize when the application is open",
+        }
+    }
+
+    pub fn from_index(i: u32) -> AppMode {
+        AppMode::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u32 {
+        AppMode::ALL.iter().position(|m| *m == self).unwrap_or(0) as u32
+    }
+}
+
+/// An installed application, identified well enough to recognise its windows.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct AppRef {
+    /// Desktop file id.
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    /// Lower-case names a window may announce itself with (WM_CLASS, application id, executable).
+    pub keys: Vec<String>,
+}
+
+/// Where imported files live.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Storage {
+    /// Use the file where it is.
+    Source,
+    /// Copy into `~/GifDeck/…`.
+    #[default]
+    Home,
+    /// Copy into `~/Documents/GifDeck/…`.
+    Documents,
+}
+
+impl Storage {
+    pub const ALL: [Storage; 3] = [Storage::Source, Storage::Home, Storage::Documents];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Storage::Source => "Load from the original location",
+            Storage::Home => "Copy into an organized folder in Home",
+            Storage::Documents => "Copy into an organized folder in Documents",
+        }
+    }
+
+    pub fn from_index(i: u32) -> Storage {
+        Storage::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> u32 {
+        Storage::ALL.iter().position(|m| *m == self).unwrap_or(0) as u32
+    }
+
+    /// `<base>/GifDeck/<kind>`; `None` when files are used in place.
+    pub fn dir(self, kind: &str) -> Option<PathBuf> {
+        let base = match self {
+            Storage::Source => return None,
+            Storage::Home => gtk::glib::home_dir(),
+            Storage::Documents => gtk::glib::user_special_dir(gtk::glib::UserDirectory::Documents).unwrap_or_else(|| gtk::glib::home_dir().join("Documents")),
+        };
+        Some(base.join("GifDeck").join(kind))
+    }
+}
+
+/// A saved PNG used as clipping mask (its alpha channel is the shape).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct Mask {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct WidgetConfig {
@@ -64,6 +229,16 @@ pub struct WidgetConfig {
     pub click_through: bool,
     /// Whether the widget is currently shown.
     pub visible: bool,
+    /// Folder widgets (`path` is a directory): how the shown file changes.
+    pub rotation: Rotation,
+    /// Alpha mask (PNG path) clipping the widget.
+    pub mask: Option<PathBuf>,
+    /// While dragging, stick to the screen edges when close.
+    pub snap_edges: bool,
+    /// While dragging, never leave the screen.
+    pub keep_inside: bool,
+    pub app: Option<AppRef>,
+    pub app_mode: AppMode,
 }
 
 impl Default for WidgetConfig {
@@ -79,11 +254,21 @@ impl Default for WidgetConfig {
             level: Level::Normal,
             click_through: false,
             visible: true,
+            rotation: Rotation::default(),
+            mask: None,
+            snap_edges: false,
+            keep_inside: false,
+            app: None,
+            app_mode: AppMode::Always,
         }
     }
 }
 
 impl WidgetConfig {
+    pub fn is_folder(&self) -> bool {
+        self.path.is_dir()
+    }
+
     /// `slot` staggers new widgets so they do not all open on the same spot.
     pub fn new(path: PathBuf, slot: usize) -> Self {
         let off = (slot % 8) as i32 * 40;
@@ -92,6 +277,9 @@ impl WidgetConfig {
 
     pub fn title(&self) -> String {
         // Media copies are stored as "<id>-<original name>"; show the original.
+        if self.is_folder() {
+            return self.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        }
         let name = self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         match name.split_once('-') {
             Some((prefix, rest)) if prefix.len() >= 8 && !rest.is_empty() => rest.to_string(),
@@ -160,25 +348,16 @@ impl Rule {
             (self.days[day] && minute >= self.start) || (self.days[(day + 6) % 7] && minute < self.end)
         }
     }
-
-    pub fn summary(&self) -> String {
-        let days = if self.days.iter().all(|d| *d) {
-            "Every day".to_string()
-        } else if self.days.iter().all(|d| !*d) {
-            "No days".to_string()
-        } else {
-            DAY_NAMES.iter().zip(self.days.iter()).filter(|(_, on)| **on).map(|(n, _)| *n).collect::<Vec<_>>().join(" ")
-        };
-        if self.all_day {
-            format!("{days} · all day")
-        } else {
-            format!("{days} · {}–{}", fmt_minutes(self.start), fmt_minutes(self.end))
-        }
-    }
 }
 
-pub fn fmt_minutes(m: u16) -> String {
-    format!("{:02}:{:02}", (m / 60) % 24, m % 60)
+/// "16:05" or "4:05 PM".
+pub fn fmt_time(m: u16, h24: bool) -> String {
+    let (h, min) = ((m / 60) % 24, m % 60);
+    if h24 {
+        format!("{h:02}:{min:02}")
+    } else {
+        format!("{}:{min:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    }
 }
 
 /// First matching rule wins (rules are ordered by the user).
@@ -208,6 +387,14 @@ pub struct AppState {
     pub schedule_enabled: bool,
     /// What the user asked for; the real state lives in the desktop/portal.
     pub autostart: bool,
+    /// Master switch (header button / quick settings toggle).
+    pub widgets_enabled: bool,
+    /// Widgets are hidden while any of these applications is showing a window.
+    pub blacklist: Vec<AppRef>,
+    /// Show times as 24-hour ("military") instead of AM/PM.
+    pub time_24h: bool,
+    pub storage: Storage,
+    pub masks: Vec<Mask>,
 }
 
 impl Default for AppState {
@@ -220,6 +407,11 @@ impl Default for AppState {
             rules: Vec::new(),
             schedule_enabled: false,
             autostart: false,
+            widgets_enabled: true,
+            blacklist: Vec::new(),
+            time_24h: true,
+            storage: Storage::default(),
+            masks: Vec::new(),
         }
     }
 }
@@ -294,7 +486,48 @@ impl AppState {
 
     /// Every media file still referenced by some preset.
     pub fn referenced_media(&self) -> Vec<&Path> {
-        self.presets.iter().flat_map(|p| p.widgets.iter().map(|w| w.path.as_path())).collect()
+        let widgets = self.presets.iter().flat_map(|p| p.widgets.iter().map(|w| w.path.as_path()));
+        widgets.chain(self.masks.iter().map(|m| m.path.as_path())).collect()
+    }
+}
+
+/// A top-level window somebody else owns (X11 only).
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Win {
+    /// Lower-case WM_CLASS parts / application id.
+    pub keys: Vec<String>,
+    pub minimized: bool,
+}
+
+/// Does `app` have a window? `showing_only`: ignore minimized ones.
+pub fn app_open(app: &AppRef, wins: &[Win], showing_only: bool) -> bool {
+    wins.iter().any(|w| (!showing_only || !w.minimized) && w.keys.iter().any(|k| app.keys.contains(k)))
+}
+
+impl AppState {
+    /// What should really be on screen: the active preset's widgets after the master switch,
+    /// the blacklist and each widget's application rule.
+    pub fn effective_widgets(&self, wins: &[Win]) -> Vec<WidgetConfig> {
+        let hide_all = !self.widgets_enabled || self.blacklist.iter().any(|a| app_open(a, wins, true));
+        self.active_preset()
+            .widgets
+            .iter()
+            .map(|w| {
+                let mut w = w.clone();
+                if hide_all {
+                    w.visible = false;
+                }
+                if let Some(app) = &w.app {
+                    match w.app_mode {
+                        AppMode::Always => {}
+                        AppMode::OnlyWhenOpen => w.visible &= app_open(app, wins, false),
+                        AppMode::MinimizeWhenOpen if app_open(app, wins, true) => w.level = Level::Desktop,
+                        AppMode::MinimizeWhenOpen => {}
+                    }
+                }
+                w
+            })
+            .collect()
     }
 }
 
@@ -390,5 +623,48 @@ mod tests {
         assert_eq!(w.title(), "cat dance");
         let w = WidgetConfig::new("/x/plain.gif".into(), 0);
         assert_eq!(w.title(), "plain");
+    }
+
+    #[test]
+    fn app_rules() {
+        let term = AppRef { keys: vec!["term".into()], ..Default::default() };
+        let game = AppRef { keys: vec!["game".into()], ..Default::default() };
+        let mut st = AppState::default();
+        let mut w = WidgetConfig::new("/a.gif".into(), 0);
+        w.app = Some(term.clone());
+        w.app_mode = AppMode::OnlyWhenOpen;
+        let mut w2 = WidgetConfig::new("/b.gif".into(), 1);
+        w2.app = Some(term.clone());
+        w2.app_mode = AppMode::MinimizeWhenOpen;
+        st.active_preset_mut().widgets = vec![w, w2];
+        let win = |k: &str, minimized| Win { keys: vec![k.into()], minimized };
+
+        let e = st.effective_widgets(&[]);
+        assert!(!e[0].visible && e[1].visible && e[1].level == Level::Normal);
+        let e = st.effective_widgets(&[win("term", false)]);
+        assert!(e[0].visible && e[1].level == Level::Desktop);
+        let e = st.effective_widgets(&[win("term", true)]); // minimized: still "open", no longer covering
+        assert!(e[0].visible && e[1].level == Level::Normal);
+
+        st.blacklist.push(game);
+        assert!(st.effective_widgets(&[win("game", false)]).iter().all(|w| !w.visible));
+        assert!(st.effective_widgets(&[win("game", true)]).iter().any(|w| w.visible));
+        st.widgets_enabled = false;
+        assert!(st.effective_widgets(&[]).iter().all(|w| !w.visible));
+    }
+
+    #[test]
+    fn rotation_schedule_and_time_format() {
+        let files: Vec<PathBuf> = ["a.gif", "b.gif"].iter().map(PathBuf::from).collect();
+        let r = Rotation {
+            schedule: vec![SchedEntry { start: 18 * 60, file: "b.gif".into() }, SchedEntry { start: 6 * 60, file: "a.gif".into() }],
+            ..Default::default()
+        };
+        assert_eq!(r.scheduled_file(&files, 12 * 60), Some(&files[0]));
+        assert_eq!(r.scheduled_file(&files, 19 * 60), Some(&files[1]));
+        assert_eq!(r.scheduled_file(&files, 60), Some(&files[1])); // before the first entry: yesterday's last
+        assert_eq!(fmt_time(16 * 60 + 5, true), "16:05");
+        assert_eq!(fmt_time(16 * 60 + 5, false), "4:05 PM");
+        assert_eq!(fmt_time(0, false), "12:00 AM");
     }
 }

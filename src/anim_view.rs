@@ -27,6 +27,9 @@ mod imp {
         pub frame: Cell<usize>,
         pub size: Cell<(i32, i32)>,
         pub downscale: Cell<bool>,
+        pub mask: RefCell<Option<gtk::gdk::Texture>>,
+        /// Bumped whenever the animation is replaced, so old timer chains stop.
+        pub generation: Cell<u32>,
     }
 
     #[glib::object_subclass]
@@ -52,7 +55,17 @@ mod imp {
             let (texture, _) = &anim.frames[self.frame.get() % anim.frames.len()];
             // Trilinear (mipmapped) filtering keeps shrunken GIFs smooth.
             let filter = if self.downscale.get() { gsk::ScalingFilter::Trilinear } else { gsk::ScalingFilter::Linear };
-            snapshot.append_scaled_texture(texture, filter, &graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
+            let rect = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let mask = self.mask.borrow();
+            if let Some(mask) = mask.as_ref() {
+                snapshot.push_mask(gsk::MaskMode::Alpha);
+                snapshot.append_scaled_texture(mask, gsk::ScalingFilter::Linear, &rect);
+                snapshot.pop();
+            }
+            snapshot.append_scaled_texture(texture, filter, &rect);
+            if mask.is_some() {
+                snapshot.pop();
+            }
         }
     }
 }
@@ -64,15 +77,25 @@ glib::wrapper! {
 }
 
 impl AnimView {
-    pub fn new(anim: Rc<Anim>, width: i32, height: i32) -> Self {
+    pub fn new(anim: Rc<Anim>, width: i32, height: i32, mask: Option<Rc<Anim>>) -> Self {
         let view: Self = glib::Object::new();
-        let imp = view.imp();
-        imp.downscale.set(width < anim.width);
-        imp.size.set((width, height));
-        *imp.anim.borrow_mut() = Some(anim);
+        view.set_anim(anim, width, height, mask);
         view.set_halign(gtk::Align::Start);
         view.set_valign(gtk::Align::Start);
         view
+    }
+
+    /// Replace what is shown (the caller calls `play()` afterwards).
+    pub fn set_anim(&self, anim: Rc<Anim>, width: i32, height: i32, mask: Option<Rc<Anim>>) {
+        let imp = self.imp();
+        imp.downscale.set(width < anim.width);
+        imp.size.set((width, height));
+        imp.frame.set(0);
+        imp.generation.set(imp.generation.get().wrapping_add(1));
+        *imp.mask.borrow_mut() = mask.map(|m| m.frames[0].0.clone());
+        *imp.anim.borrow_mut() = Some(anim);
+        self.queue_resize();
+        self.queue_draw();
     }
 
     fn show_frame(&self, index: usize) {
@@ -86,13 +109,16 @@ impl AnimView {
             Some(a) if a.is_animated() => a,
             _ => return,
         };
-        tick(self.downgrade(), anim, Instant::now());
+        tick(self.downgrade(), anim, Instant::now(), self.imp().generation.get());
     }
 }
 
 /// `started` is when the currently shown frame appeared.
-fn tick(weak: glib::WeakRef<AnimView>, anim: Rc<Anim>, started: Instant) {
+fn tick(weak: glib::WeakRef<AnimView>, anim: Rc<Anim>, started: Instant, generation: u32) {
     let Some(view) = weak.upgrade() else { return };
+    if view.imp().generation.get() != generation {
+        return;
+    }
     let n = anim.frames.len();
     let current = view.imp().frame.get() % n;
     let now = Instant::now();
@@ -101,7 +127,10 @@ fn tick(weak: glib::WeakRef<AnimView>, anim: Rc<Anim>, started: Instant) {
     let due = (started + Duration::from_millis(anim.frames[current].1 as u64)).max(now);
     glib::timeout_add_local_once(due.saturating_duration_since(now), move || {
         let Some(view) = weak.upgrade() else { return };
+        if view.imp().generation.get() != generation {
+            return;
+        }
         view.show_frame((current + 1) % n);
-        tick(weak, anim, due);
+        tick(weak, anim, due, generation);
     });
 }

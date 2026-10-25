@@ -32,6 +32,34 @@ struct Child {
     pos: (i32, i32),
     size: (i32, i32),
     click_through: bool,
+    snap_edges: bool,
+    keep_inside: bool,
+}
+
+/// Pull toward a screen edge when this close (pixels).
+const SNAP: i32 = 16;
+
+/// Where a dragged widget of `size` ends up, given the surface size.
+/// Unconfined widgets may leave the screen; `keep_inside` clamps, `snap_edges` sticks to near edges.
+fn place(pos: (i32, i32), size: (i32, i32), area: (i32, i32), keep_inside: bool, snap_edges: bool) -> (i32, i32) {
+    let axis = |p: i32, len: i32, max: i32| {
+        if max <= 0 {
+            return p; // surface not sized yet: do not shove the widget anywhere
+        }
+        let mut p = p;
+        if keep_inside {
+            p = p.clamp(0, (max - len).max(0));
+        }
+        if snap_edges {
+            if p.abs() < SNAP {
+                p = 0;
+            } else if (max - len - p).abs() < SNAP {
+                p = max - len;
+            }
+        }
+        p
+    };
+    (axis(pos.0, size.0, area.0), axis(pos.1, size.1, area.1))
 }
 
 pub struct LayerHost {
@@ -80,17 +108,28 @@ impl LayerHost {
     }
 
     /// Add (or replace) a widget. New widgets go to the front until `reorder` is called.
-    pub fn upsert(&self, cfg: &WidgetConfig, anim: &Rc<Anim>) {
+    pub fn upsert(&self, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
         self.remove(&cfg.id);
         let (w, h) = scaled_size(anim, cfg.scale);
-        let view = AnimView::new(anim.clone(), w, h);
+        let view = AnimView::new(anim.clone(), w, h, mask);
         view.set_opacity(cfg.opacity);
         view.play();
         if !cfg.click_through {
             view.set_cursor_from_name(Some("grab"));
         }
         self.fixed.put(&view, cfg.x as f64, cfg.y as f64);
-        self.children.borrow_mut().push(Child { id: cfg.id.clone(), view, pos: (cfg.x, cfg.y), size: (w, h), click_through: cfg.click_through });
+        self.children.borrow_mut().push(Child { id: cfg.id.clone(), view, pos: (cfg.x, cfg.y), size: (w, h), click_through: cfg.click_through, snap_edges: cfg.snap_edges, keep_inside: cfg.keep_inside });
+        self.update_input_region();
+    }
+
+    /// Show another picture in an existing widget (folder rotation).
+    pub fn replace_anim(&self, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
+        if let Some(c) = self.children.borrow_mut().iter_mut().find(|c| c.id == cfg.id) {
+            let (w, h) = scaled_size(anim, cfg.scale);
+            c.size = (w, h);
+            c.view.set_anim(anim.clone(), w, h, mask);
+            c.view.play();
+        }
         self.update_input_region();
     }
 
@@ -152,6 +191,8 @@ impl LayerHost {
             id: Option<String>,
             start: (i32, i32),
             size: (i32, i32),
+            keep_inside: bool,
+            snap_edges: bool,
         }
         let drag = Rc::new(RefCell::new(Drag::default()));
         let gesture = gtk::GestureDrag::new();
@@ -168,9 +209,9 @@ impl LayerHost {
                     .iter()
                     .rev()
                     .find(|c| !c.click_through && x >= c.pos.0 as f64 && x < (c.pos.0 + c.size.0) as f64 && y >= c.pos.1 as f64 && y < (c.pos.1 + c.size.1) as f64)
-                    .map(|c| (c.id.clone(), c.pos, c.size));
+                    .map(|c| (c.id.clone(), c.pos, c.size, c.keep_inside, c.snap_edges));
                 match hit {
-                    Some((id, start, size)) => *drag.borrow_mut() = Drag { id: Some(id), start, size },
+                    Some((id, start, size, keep_inside, snap_edges)) => *drag.borrow_mut() = Drag { id: Some(id), start, size, keep_inside, snap_edges },
                     None => {
                         *drag.borrow_mut() = Drag::default();
                         g.set_state(gtk::EventSequenceState::Denied);
@@ -184,8 +225,8 @@ impl LayerHost {
             move |_, ox, oy| {
                 let (Some(host), d) = (host.upgrade(), drag.borrow()) else { return };
                 let Some(id) = &d.id else { return };
-                let nx = (d.start.0 + ox.round() as i32).clamp(0, (host.window.width() - d.size.0).max(0));
-                let ny = (d.start.1 + oy.round() as i32).clamp(0, (host.window.height() - d.size.1).max(0));
+                let want = (d.start.0 + ox.round() as i32, d.start.1 + oy.round() as i32);
+                let (nx, ny) = place(want, d.size, (host.window.width(), host.window.height()), d.keep_inside, d.snap_edges);
                 host.set_position(id, nx, ny);
             }
         });
@@ -205,5 +246,24 @@ impl LayerHost {
         });
 
         self.fixed.add_controller(gesture);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place;
+
+    #[test]
+    fn drag_placement() {
+        let area = (1000, 800);
+        let size = (100, 50);
+        // free: may leave the screen, and an unsized surface never moves anything
+        assert_eq!(place((-30, 900), size, area, false, false), (-30, 900));
+        assert_eq!(place((-30, 900), size, (0, 0), true, true), (-30, 900));
+        // contained
+        assert_eq!(place((-30, 900), size, area, true, false), (0, 750));
+        // snapped near edges only
+        assert_eq!(place((10, 40), size, area, false, true), (0, 40));
+        assert_eq!(place((895, 300), size, area, false, true), (900, 300));
     }
 }

@@ -116,6 +116,18 @@ fn main() -> glib::ExitCode {
                 }
             });
 
+            glib::timeout_add_local(Duration::from_secs(1), {
+                let ctx = Rc::downgrade(&ctx);
+                move || match ctx.upgrade() {
+                    Some(ctx) => {
+                        ctx.poll_apps();
+                        ctx.manager.tick_rotation();
+                        glib::ControlFlow::Continue
+                    }
+                    None => glib::ControlFlow::Break,
+                }
+            });
+
             *running.borrow_mut() = Some(Running {
                 ctx,
                 ui,

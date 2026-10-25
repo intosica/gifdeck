@@ -1,0 +1,6 @@
+{
+  "uuid": "gifdeck@gifdeck.dev",
+  "name": "GifDeck quick toggle",
+  "description": "Quick Settings toggle that shows/hides all GifDeck widgets. Works with Quick Settings Tweaks.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"]
+}

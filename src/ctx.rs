@@ -15,7 +15,7 @@ use gtk::{gio, glib};
 use crate::env::Env;
 use crate::manager::Manager;
 use crate::media;
-use crate::model::{self, AppState, Preset, Rule, WidgetConfig};
+use crate::model::{self, AppRef, AppState, Mask, Preset, Rule, Storage, Win, WidgetConfig};
 
 /// What the UI should redraw.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,8 +26,14 @@ pub enum Refresh {
     Positions,
     /// A preset was renamed: update labels only (the user may be typing in one).
     Names,
+    /// Mask list changed.
+    Masks,
     /// The rule list was restructured.
     Schedule,
+    /// Master switch changed.
+    Enabled,
+    /// Blacklist changed.
+    Blacklist,
     /// Only the "right now" status needs recomputing.
     Status,
     All,
@@ -45,6 +51,35 @@ pub struct AppCtx {
     /// A preset is only auto-applied when this *changes*, so a manual
     /// choice sticks until the schedule moves on to something else.
     last_scheduled: RefCell<Option<Option<String>>>,
+    /// Other applications' windows as of the last poll (X11).
+    wins: RefCell<Vec<Win>>,
+}
+
+/// Put `src` (file or folder) where `storage` says; returns the path the widget should use.
+fn store(src: &Path, kind: &str, storage: Storage) -> std::io::Result<PathBuf> {
+    let Some(dir) = storage.dir(kind) else { return Ok(src.to_path_buf()) };
+    fs::create_dir_all(&dir)?;
+    let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !src.is_dir() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    let mut dest = dir.join(&name);
+    for n in 2.. {
+        if !dest.exists() {
+            break;
+        }
+        dest = dir.join(format!("{stem} ({n}){ext}"));
+    }
+    if src.is_dir() {
+        fs::create_dir_all(&dest)?;
+        for f in media::list_folder(src) {
+            fs::copy(&f, dest.join(f.file_name().unwrap_or_default()))?;
+        }
+    } else {
+        fs::copy(src, &dest)?;
+    }
+    Ok(dest)
 }
 
 impl AppCtx {
@@ -77,6 +112,7 @@ impl AppCtx {
                 on_refresh: RefCell::new(None),
                 on_toast: RefCell::new(None),
                 last_scheduled: RefCell::new(None),
+                wins: RefCell::new(Vec::new()),
             }
         })
     }
@@ -114,8 +150,62 @@ impl AppCtx {
     /// Save + reconcile windows right now.
     pub fn flush(&self) {
         self.save();
-        let widgets = self.state.borrow().active_preset().widgets.clone();
+        self.apply();
+    }
+
+    /// Reconcile windows with the state, the master switch and the application rules.
+    fn apply(&self) {
+        let widgets = self.state.borrow().effective_widgets(&self.wins.borrow());
         self.manager.sync(&widgets);
+    }
+
+    /// Look at the other applications' windows (every second); re-apply only when something changed.
+    pub fn poll_apps(&self) {
+        if self.env.backend != crate::env::Backend::X11 {
+            return;
+        }
+        let wins = crate::x11::windows();
+        if wins != *self.wins.borrow() {
+            *self.wins.borrow_mut() = wins;
+            self.apply();
+        }
+    }
+
+    pub fn set_widgets_enabled(self: &Rc<Self>, on: bool) {
+        if self.state.borrow().widgets_enabled != on {
+            self.state.borrow_mut().widgets_enabled = on;
+            self.flush();
+            self.refresh(Refresh::Enabled);
+        }
+    }
+
+    pub fn add_blacklist(self: &Rc<Self>, app: AppRef) {
+        {
+            let mut st = self.state.borrow_mut();
+            if st.blacklist.iter().any(|a| a.id == app.id) {
+                return;
+            }
+            st.blacklist.push(app);
+        }
+        self.flush();
+        self.refresh(Refresh::Blacklist);
+    }
+
+    pub fn remove_blacklist(self: &Rc<Self>, id: &str) {
+        self.state.borrow_mut().blacklist.retain(|a| a.id != id);
+        self.flush();
+        self.refresh(Refresh::Blacklist);
+    }
+
+    pub fn set_time_24h(self: &Rc<Self>, on: bool) {
+        self.state.borrow_mut().time_24h = on;
+        self.save();
+        self.refresh(Refresh::Schedule);
+    }
+
+    pub fn set_storage(&self, storage: Storage) {
+        self.state.borrow_mut().storage = storage;
+        self.save();
     }
 
     /// Same, but coalesced: dragging a slider should not rebuild windows 60 times a second.
@@ -145,44 +235,79 @@ impl AppCtx {
         self.commit();
     }
 
-    /// Copy the picked files into the app's own media folder (so they survive
-    /// the original being moved/deleted, and work inside the Flatpak sandbox)
-    /// and open a widget for each.
+    /// Open a widget for each picked file or folder (a folder becomes one rotating widget).
+    /// Where the file lives afterwards follows the storage setting.
     pub fn import_files(self: &Rc<Self>, files: Vec<gio::File>) {
+        self.import(files, false);
+    }
+
+    /// Save the picked PNGs as alpha masks.
+    pub fn import_masks(self: &Rc<Self>, files: Vec<gio::File>) {
+        self.import(files, true);
+    }
+
+    fn import(self: &Rc<Self>, files: Vec<gio::File>, masks: bool) {
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let media_dir = AppState::media_dir();
+            let storage = this.state.borrow().storage;
             let mut added = 0;
             for file in files {
                 let Some(src) = file.path() else {
                     this.toast("That location cannot be read as a file.");
                     continue;
                 };
-                if !media::is_supported(&src) {
-                    this.toast(&format!("{} is not a GIF or PNG image.", src.file_name().unwrap_or_default().to_string_lossy()));
+                let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let folder = src.is_dir();
+                let ok = if masks { !folder && media::is_png(&src) } else if folder { !media::list_folder(&src).is_empty() } else { media::is_supported(&src) };
+                if !ok {
+                    this.toast(&match (masks, folder) {
+                        (true, _) => format!("{name} is not a PNG image."),
+                        (false, true) => format!("{name} has no GIF or PNG files."),
+                        (false, false) => format!("{name} is not a GIF or PNG image."),
+                    });
                     continue;
                 }
-                let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let dest = media_dir.join(format!("{}-{}", &model::new_id()[..8], name));
-                let (s, d, dir) = (src.clone(), dest.clone(), media_dir.clone());
-                let copied = gio::spawn_blocking(move || fs::create_dir_all(&dir).and_then(|_| fs::copy(&s, &d))).await;
-                match copied {
-                    Ok(Ok(_)) => {
-                        let mut st = this.state.borrow_mut();
-                        let preset = st.active_preset_mut();
-                        let slot = preset.widgets.len();
-                        // New widgets start in front of the others.
-                        preset.widgets.insert(0, WidgetConfig::new(dest, slot));
-                        added += 1;
-                    }
-                    _ => this.toast(&format!("Could not import {name}.")),
+                let kind = if masks { "Masks" } else if folder { "Widgets" } else if media::is_png(&src) { "PNGs" } else { "GIFs" };
+                let s = src.clone();
+                let stored = gio::spawn_blocking(move || store(&s, kind, storage)).await;
+                let Ok(Ok(dest)) = stored else {
+                    this.toast(&format!("Could not import {name}."));
+                    continue;
+                };
+                let mut st = this.state.borrow_mut();
+                if masks {
+                    let name = dest.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    st.masks.push(Mask { id: model::new_id(), name, path: dest });
+                } else {
+                    let preset = st.active_preset_mut();
+                    let slot = preset.widgets.len();
+                    // New widgets start in front of the others.
+                    preset.widgets.insert(0, WidgetConfig::new(dest, slot));
                 }
+                added += 1;
             }
             if added > 0 {
                 this.flush();
-                this.refresh(Refresh::Widgets);
+                this.refresh(if masks { Refresh::Masks } else { Refresh::Widgets });
             }
         });
+    }
+
+    pub fn remove_mask(self: &Rc<Self>, id: &str) {
+        {
+            let mut st = self.state.borrow_mut();
+            let Some(path) = st.masks.iter().find(|m| m.id == id).map(|m| m.path.clone()) else { return };
+            st.masks.retain(|m| m.id != id);
+            for w in st.presets.iter_mut().flat_map(|p| p.widgets.iter_mut()) {
+                if w.mask.as_ref() == Some(&path) {
+                    w.mask = None;
+                }
+            }
+        }
+        self.gc_media();
+        self.flush();
+        self.refresh(Refresh::Masks);
+        self.refresh(Refresh::Widgets);
     }
 
     pub fn remove_widget(self: &Rc<Self>, id: &str) {

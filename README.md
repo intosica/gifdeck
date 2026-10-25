@@ -20,6 +20,17 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 | Start at login | Flatpak: Background portal. Native: `~/.config/autostart` entry. UI switch reflects the real outcome. |
 | COSMIC vs X11 detection | `env.rs` inspects the GDK display type, `XDG_CURRENT_DESKTOP`, layer-shell support and compositing; the Settings page shows it and the widget UI warns when a combination is limited. |
 
+### New in this version
+- **Click-through** instead of locking; per-widget *snap to edges* / *keep inside screen* (layer-shell).
+- **Folder widgets**: rotate sequentially, randomly (min/max seconds) or on a schedule.
+- **Drag & drop** files/folders onto the window to import (onto the Masks tab: PNG masks).
+- **Masks** tab: PNG alpha masks shown as black silhouettes; apply per widget.
+- **Files** setting: use the source path, or keep organized copies in Home or Documents.
+- **Single-row schedule** with 24h/12h toggle.
+- **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
+- **Quick Settings**: `data/gnome-shell-extension/` adds a toggle-all-widgets button (works with Quick Settings Tweaks). Install: copy to `~/.local/share/gnome-shell/extensions/gifdeck@gifdeck.dev/` and enable it.
+- App detection is X11-only (no Wayland protocol exists for it); in Flatpak only exported apps are listed.
+
 ## Why GTK4 + gtk4-layer-shell (and not libcosmic)
 
 The hard part of this app is **window layering and placement**, not the look of the

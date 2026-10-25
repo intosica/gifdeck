@@ -47,6 +47,50 @@ pub fn is_supported(path: &Path) -> bool {
         && (magic.starts_with(b"GIF8") || magic.starts_with(&[0x89, b'P', b'N', b'G']))
 }
 
+/// Natural order: "img2" < "img10".
+fn natural_key(name: &str) -> Vec<(u64, String)> {
+    let lower = name.to_lowercase();
+    let mut out = Vec::new();
+    let mut rest = lower.as_str();
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        if digits > 0 {
+            out.push((rest[..digits].parse().unwrap_or(u64::MAX), String::new()));
+            rest = &rest[digits..];
+        } else {
+            let text = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(rest.len());
+            out.push((0, rest[..text].to_string()));
+            rest = &rest[text..];
+        }
+    }
+    out
+}
+
+/// GIF / PNG files directly inside `dir`, in natural name order.
+pub fn list_folder(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_supported(p)).collect())
+        .unwrap_or_default();
+    files.sort_by_key(|p| natural_key(&p.file_name().unwrap_or_default().to_string_lossy()));
+    files
+}
+
+/// Small solid-black picture of a PNG's shape (its alpha channel), for mask previews.
+pub fn silhouette(path: &Path, size: u32) -> Option<gdk::Texture> {
+    let img = image::open(path).ok()?.thumbnail(size, size).into_rgba8();
+    let (w, h) = img.dimensions();
+    let mut raw = img.into_raw();
+    for px in raw.chunks_exact_mut(4) {
+        px[..3].fill(0);
+    }
+    Some(gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(raw), w as usize * 4).upcast())
+}
+
+pub fn is_png(path: &Path) -> bool {
+    let mut magic = [0u8; 4];
+    File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && magic == [0x89, b'P', b'N', b'G']
+}
+
 pub fn decode(path: &Path, budget: usize) -> Result<Decoded, String> {
     let mut magic = [0u8; 8];
     File::open(path)
@@ -279,6 +323,19 @@ mod tests {
 
         // delays: 5cs -> 50ms, 0cs -> browser-compatible 100ms, 20cs -> 200ms
         assert_eq!(d.frames.iter().map(|f| f.delay_ms).collect::<Vec<_>>(), vec![50, 100, 200, 70]);
+    }
+
+    #[test]
+    fn folder_listing_is_natural() {
+        let dir = tmp("folder");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["img10.gif", "img2.gif", "img1.gif"] {
+            write_test_gif(&dir.join(n));
+        }
+        std::fs::write(dir.join("notes.txt"), b"not an image at all").unwrap();
+        let names: Vec<_> = list_folder(&dir).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["img1.gif", "img2.gif", "img10.gif"]);
     }
 
     #[test]

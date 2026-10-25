@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk::glib;
 use gtk4_layer_shell::Layer;
@@ -14,8 +16,29 @@ use gtk4_layer_shell::Layer;
 use crate::env::{Backend, Env, Role};
 use crate::layer_host::LayerHost;
 use crate::media;
-use crate::model::{Level, WidgetConfig};
+use crate::model::{self, Level, RotMode, Rotation, WidgetConfig};
 use crate::widget::{Backing, ClosedCb, MovedCb, WidgetWindow};
+
+/// Which file of a folder widget is showing, and when it changes.
+struct Rot {
+    /// What this state was made for; a different folder or rotation starts over.
+    key: (PathBuf, Rotation),
+    files: Vec<PathBuf>,
+    current: PathBuf,
+    due: Option<Instant>,
+}
+
+fn next_due(r: &Rotation) -> Option<Instant> {
+    let secs = match r.mode {
+        RotMode::Sequential => r.interval.max(1),
+        RotMode::Random => {
+            let (lo, hi) = (r.min.max(1), r.max.max(r.min.max(1)));
+            glib::random_int_range(lo as i32, hi as i32 + 1) as u32
+        }
+        RotMode::Scheduled => return None,
+    };
+    Some(Instant::now() + Duration::from_secs(secs as u64))
+}
 
 pub struct Manager {
     app: adw::Application,
@@ -27,6 +50,8 @@ pub struct Manager {
     desired: RefCell<Vec<WidgetConfig>>,
     /// Widgets whose image is still being decoded.
     pending: RefCell<HashSet<String>>,
+    /// Folder widgets' rotation state, by widget id.
+    rot: RefCell<HashMap<String, Rot>>,
     on_moved: MovedCb,
     on_closed: ClosedCb,
     on_error: Rc<dyn Fn(&str, &str)>,
@@ -34,7 +59,15 @@ pub struct Manager {
 
 /// Changes that cannot be applied to an existing widget in place.
 fn needs_rebuild(a: &WidgetConfig, b: &WidgetConfig) -> bool {
-    a.path != b.path || a.scale != b.scale || a.decorated != b.decorated || a.level != b.level || a.click_through != b.click_through
+    a.path != b.path
+        || a.scale != b.scale
+        || a.decorated != b.decorated
+        || a.level != b.level
+        || a.click_through != b.click_through
+        || a.mask != b.mask
+        || a.rotation != b.rotation
+        || a.snap_edges != b.snap_edges
+        || a.keep_inside != b.keep_inside
 }
 
 impl Manager {
@@ -46,6 +79,7 @@ impl Manager {
             hosts: RefCell::new(HashMap::new()),
             desired: RefCell::new(Vec::new()),
             pending: RefCell::new(HashSet::new()),
+            rot: RefCell::new(HashMap::new()),
             on_moved,
             on_closed,
             on_error,
@@ -90,6 +124,7 @@ impl Manager {
         let order = |list: &[WidgetConfig]| list.iter().filter(|w| w.visible).map(|w| w.id.clone()).collect::<Vec<_>>();
         let order_changed = order(&self.desired.borrow()) != order(widgets);
         *self.desired.borrow_mut() = widgets.to_vec();
+        self.rot.borrow_mut().retain(|id, _| widgets.iter().any(|w| &w.id == id));
         let wanted: HashSet<&str> = widgets.iter().filter(|w| w.visible).map(|w| w.id.as_str()).collect();
 
         let stale: Vec<String> = self.widgets.borrow().keys().filter(|id| !wanted.contains(id.as_str())).cloned().collect();
@@ -123,19 +158,48 @@ impl Manager {
         }
     }
 
+    /// The file a widget shows right now: its own path, or the current file of its folder.
+    fn current_file(&self, cfg: &WidgetConfig) -> Option<PathBuf> {
+        if !cfg.is_folder() {
+            return Some(cfg.path.clone());
+        }
+        let mut rot = self.rot.borrow_mut();
+        let key = (cfg.path.clone(), cfg.rotation.clone());
+        if let Some(r) = rot.get(&cfg.id).filter(|r| r.key == key) {
+            return Some(r.current.clone());
+        }
+        let files = media::list_folder(&cfg.path);
+        let current = match cfg.rotation.mode {
+            RotMode::Scheduled => cfg.rotation.scheduled_file(&files, model::now_slot().1).or(files.first()),
+            _ => files.first(),
+        }?
+        .clone();
+        rot.insert(cfg.id.clone(), Rot { key, files, current: current.clone(), due: next_due(&cfg.rotation) });
+        Some(current)
+    }
+
     /// Decode (async) and open widget `id`, using whatever the *latest* desired
     /// configuration is by the time decoding has finished.
     fn spawn_build(self: &Rc<Self>, id: String) {
         if !self.pending.borrow_mut().insert(id.clone()) {
             return;
         }
-        let Some(path) = self.desired.borrow().iter().find(|w| w.id == id).map(|w| w.path.clone()) else {
+        let Some(first) = self.desired.borrow().iter().find(|w| w.id == id).cloned() else {
             self.pending.borrow_mut().remove(&id);
+            return;
+        };
+        let Some(path) = self.current_file(&first) else {
+            self.pending.borrow_mut().remove(&id);
+            (self.on_error)(&first.title(), "the folder has no GIF or PNG files");
             return;
         };
         let this = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let result = media::load(path).await;
+            let mask = match &first.mask {
+                Some(m) => media::load(m.clone()).await.ok(),
+                None => None,
+            };
             let Some(this) = this.upgrade() else { return };
             this.pending.borrow_mut().remove(&id);
             let cfg = this.desired.borrow().iter().find(|w| w.id == id && w.visible).cloned();
@@ -148,9 +212,9 @@ impl Manager {
                     let widget = match this.env.role(&cfg) {
                         Role::Layer(layer) => {
                             let host = this.host_for(cfg.level, layer);
-                            WidgetWindow::build_hosted(&host, &cfg, &anim)
+                            WidgetWindow::build_hosted(&host, &cfg, &anim, mask)
                         }
-                        Role::Toplevel => WidgetWindow::build_window(&this.app, &this.env, &cfg, &anim, this.on_closed.clone()),
+                        Role::Toplevel => WidgetWindow::build_window(&this.app, &this.env, &cfg, &anim, mask, this.on_closed.clone()),
                     };
                     this.widgets.borrow_mut().insert(id.clone(), widget);
                     this.restack(Some(&id));
@@ -158,6 +222,65 @@ impl Manager {
                 Err(msg) => (this.on_error)(&cfg.title(), &msg),
             }
         });
+    }
+
+    /// Called every second: advance folder widgets whose time has come.
+    pub fn tick_rotation(self: &Rc<Self>) {
+        let now = Instant::now();
+        let minute = model::now_slot().1;
+        let mut switches: Vec<(String, PathBuf)> = Vec::new();
+        {
+            let widgets = self.widgets.borrow();
+            let mut rot = self.rot.borrow_mut();
+            for (id, w) in widgets.iter() {
+                let Some(r) = rot.get_mut(id) else { continue };
+                let rotation = &w.cfg.rotation;
+                let target = match rotation.mode {
+                    RotMode::Scheduled => rotation.scheduled_file(&r.files, minute).cloned(),
+                    _ if r.due.is_some_and(|d| d <= now) => {
+                        r.files = media::list_folder(&w.cfg.path); // pick up files added meanwhile
+                        r.due = next_due(rotation);
+                        let n = r.files.len();
+                        let at = r.files.iter().position(|f| *f == r.current);
+                        let next = match (rotation.mode, at) {
+                            (RotMode::Random, _) if n > 1 => {
+                                // anything but the current file
+                                let skip = at.map(|a| a as i32).unwrap_or(-1);
+                                let mut i = glib::random_int_range(0, n as i32 - 1);
+                                if i >= skip && skip >= 0 {
+                                    i += 1;
+                                }
+                                Some(i as usize)
+                            }
+                            (_, Some(a)) if n > 0 => Some((a + 1) % n),
+                            _ if n > 0 => Some(0),
+                            _ => None,
+                        };
+                        next.map(|i| r.files[i].clone())
+                    }
+                    _ => None,
+                };
+                if let Some(t) = target.filter(|t| *t != r.current) {
+                    r.current = t.clone();
+                    switches.push((id.clone(), t));
+                }
+            }
+        }
+        for (id, path) in switches {
+            let this = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let Ok(anim) = media::load(path).await else { return };
+                let Some(this) = this.upgrade() else { return };
+                let mask = match this.widgets.borrow().get(&id).and_then(|w| w.cfg.mask.clone()) {
+                    Some(m) => media::load(m).await.ok(),
+                    None => None,
+                };
+                let ws = this.widgets.borrow();
+                if let Some(w) = ws.get(&id) {
+                    w.set_media(&anim, mask);
+                }
+            });
+        }
     }
 
     /// Enforce the user's priority order (index 0 = front) inside each layer.

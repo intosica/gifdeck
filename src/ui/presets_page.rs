@@ -1,7 +1,6 @@
 //! "Presets" page: manage presets, and assign them to weekdays / times of day.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -17,7 +16,6 @@ pub struct PresetsPage {
     rule_list: gtk::ListBox,
     enabled: adw::SwitchRow,
     status: adw::ActionRow,
-    expanded: RefCell<HashSet<String>>,
     updating: Rc<Cell<bool>>,
 }
 
@@ -33,33 +31,6 @@ fn clear(list: &gtk::ListBox) {
     while let Some(c) = list.first_child() {
         list.remove(&c);
     }
-}
-
-/// "hh : mm" editor returning minutes since midnight.
-fn time_box(minutes: u16, on_change: impl Fn(u16) + 'static) -> gtk::Box {
-    let hours = gtk::SpinButton::with_range(0.0, 23.0, 1.0);
-    let mins = gtk::SpinButton::with_range(0.0, 59.0, 1.0);
-    hours.set_value((minutes / 60) as f64);
-    mins.set_value((minutes % 60) as f64);
-    for s in [&hours, &mins] {
-        s.set_valign(gtk::Align::Center);
-        s.set_wrap(true);
-        s.set_width_chars(2);
-        s.connect_output(|s| {
-            s.set_text(&format!("{:02}", s.value() as i32));
-            glib::Propagation::Stop
-        });
-    }
-    let cb = Rc::new(on_change);
-    for s in [&hours, &mins] {
-        let (cb, hours, mins) = (cb.clone(), hours.clone(), mins.clone());
-        s.connect_value_changed(move |_| cb((hours.value() as u16) * 60 + mins.value() as u16));
-    }
-    let b = gtk::Box::builder().spacing(4).valign(gtk::Align::Center).build();
-    b.append(&hours);
-    b.append(&gtk::Label::new(Some(":")));
-    b.append(&mins);
-    b
 }
 
 impl PresetsPage {
@@ -80,12 +51,22 @@ impl PresetsPage {
             .subtitle("Uses the rules below. The first matching rule wins.")
             .build();
         let status = adw::ActionRow::builder().title("Right now").build();
+        let h24 = adw::SwitchRow::builder()
+            .title("24-hour time")
+            .subtitle("Off shows AM / PM")
+            .active(ctx.state.borrow().time_24h)
+            .build();
+        {
+            let ctx = ctx.clone();
+            h24.connect_active_notify(move |s| ctx.set_time_24h(s.is_active()));
+        }
         let add_rule = gtk::Button::builder()
             .child(&adw::ButtonContent::builder().icon_name("list-add-symbolic").label("Rule").build())
             .build();
         let rule_list = list_box();
         let schedule_group = adw::PreferencesGroup::builder().title("Schedule").header_suffix(&add_rule).build();
         schedule_group.add(&enabled);
+        schedule_group.add(&h24);
         schedule_group.add(&status);
         let rules_group = adw::PreferencesGroup::new();
         rules_group.add(&rule_list);
@@ -104,7 +85,6 @@ impl PresetsPage {
             rule_list,
             enabled,
             status,
-            expanded: RefCell::new(HashSet::new()),
             updating: Rc::new(Cell::new(false)),
         });
 
@@ -216,75 +196,24 @@ impl PresetsPage {
         self.update_status();
     }
 
-    fn build_rule(self: &Rc<Self>, rule: &Rule, idx: usize, total: usize, presets: &[(String, String)]) -> adw::ExpanderRow {
+    /// One compact row per rule: preset, days, time window, order and delete.
+    fn build_rule(self: &Rc<Self>, rule: &Rule, idx: usize, total: usize, presets: &[(String, String)]) -> gtk::ListBoxRow {
         let ctx = self.ctx.clone();
         let id = rule.id.clone();
-        let name_of = |pid: &str| presets.iter().find(|(i, _)| i == pid).map(|(_, n)| n.clone()).unwrap_or_default();
-
-        let row = adw::ExpanderRow::builder()
-            .title(glib::markup_escape_text(&format!("Use “{}”", name_of(&rule.preset))))
-            .subtitle(glib::markup_escape_text(&rule.summary()))
-            .expanded(self.expanded.borrow().contains(&id))
-            .build();
-        {
-            let (this, id) = (Rc::downgrade(self), id.clone());
-            row.connect_expanded_notify(move |r| {
-                if let Some(this) = this.upgrade() {
-                    if r.is_expanded() {
-                        this.expanded.borrow_mut().insert(id.clone());
-                    } else {
-                        this.expanded.borrow_mut().remove(&id);
-                    }
-                }
-            });
-        }
-
-        let up = flat_button("go-up-symbolic", "Check this rule earlier");
-        let down = flat_button("go-down-symbolic", "Check this rule later");
-        let del = flat_button("user-trash-symbolic", "Delete rule");
-        up.set_sensitive(idx > 0);
-        down.set_sensitive(idx + 1 < total);
-        row.add_suffix(&del);
-        row.add_suffix(&down);
-        row.add_suffix(&up);
-        {
-            let (ctx, id) = (ctx.clone(), id.clone());
-            up.connect_clicked(move |_| ctx.move_rule(&id, -1));
-        }
-        {
-            let (ctx, id) = (ctx.clone(), id.clone());
-            down.connect_clicked(move |_| ctx.move_rule(&id, 1));
-        }
-        {
-            let (ctx, id) = (ctx.clone(), id.clone());
-            del.connect_clicked(move |_| ctx.remove_rule(&id));
-        }
-
-        // Keep the header in sync with the edited rule without rebuilding (rebuilding would close the row).
-        let refresh_header: Rc<dyn Fn()> = {
-            let (row, ctx, id) = (row.downgrade(), ctx.clone(), id.clone());
-            Rc::new(move || {
-                let Some(row) = row.upgrade() else { return };
-                let st = ctx.state.borrow();
-                if let Some(r) = st.rules.iter().find(|r| r.id == id) {
-                    let name = st.preset(&r.preset).map(|p| p.name.clone()).unwrap_or_default();
-                    row.set_title(&glib::markup_escape_text(&format!("Use “{name}”")));
-                    row.set_subtitle(&glib::markup_escape_text(&r.summary()));
-                }
-            })
-        };
+        let h24 = ctx.state.borrow().time_24h;
+        let wrap = adw::WrapBox::builder().child_spacing(8).line_spacing(6).margin_top(8).margin_bottom(8).margin_start(12).margin_end(12).build();
         let edit = {
-            let (ctx, id, refresh_header) = (ctx.clone(), id.clone(), refresh_header.clone());
-            Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| {
-                ctx.edit_rule(&id, f);
-                refresh_header();
-            })
+            let (ctx, id) = (ctx.clone(), id.clone());
+            Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| ctx.edit_rule(&id, f))
         };
+        let center = |w: &gtk::Widget| w.set_valign(gtk::Align::Center);
 
         // preset
         let names: Vec<&str> = presets.iter().map(|(_, n)| n.as_str()).collect();
         let selected = presets.iter().position(|(i, _)| *i == rule.preset).unwrap_or(0) as u32;
-        let preset_row = adw::ComboRow::builder().title("Preset").model(&gtk::StringList::new(&names)).selected(selected).build();
+        let preset_row = gtk::DropDown::from_strings(&names);
+        preset_row.set_selected(selected);
+        center(preset_row.upcast_ref());
         {
             let (edit, updating) = (edit.clone(), self.updating.clone());
             let ids: Vec<String> = presets.iter().map(|(i, _)| i.clone()).collect();
@@ -297,11 +226,10 @@ impl PresetsPage {
                 }
             });
         }
-        row.add_row(&preset_row);
+        wrap.append(&preset_row);
 
         // days
-        let days_row = adw::ActionRow::builder().title("Days").build();
-        let days_box = gtk::Box::builder().spacing(4).valign(gtk::Align::Center).css_classes(["linked"]).build();
+        let days_box = gtk::Box::builder().valign(gtk::Align::Center).css_classes(["linked"]).build();
         for (d, label) in DAY_NAMES.iter().enumerate() {
             let t = gtk::ToggleButton::builder().label(&label[..1]).tooltip_text(*label).active(rule.days[d]).build();
             let (edit, updating) = (edit.clone(), self.updating.clone());
@@ -314,37 +242,55 @@ impl PresetsPage {
             });
             days_box.append(&t);
         }
-        days_row.add_suffix(&days_box);
-        row.add_row(&days_row);
+        wrap.append(&days_box);
 
         // time window
-        let all_day = adw::SwitchRow::builder().title("All day").active(rule.all_day).build();
-        let from = adw::ActionRow::builder().title("From").build();
-        let until = adw::ActionRow::builder().title("Until").subtitle("An earlier time than “From” means after midnight").build();
+        let all_day = gtk::CheckButton::builder().label("All day").active(rule.all_day).valign(gtk::Align::Center).build();
+        let window = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).visible(!rule.all_day).build();
         {
             let edit = edit.clone();
-            from.add_suffix(&time_box(rule.start, move |m| edit(Box::new(move |r| r.start = m))));
+            window.append(&super::time_box(rule.start, h24, move |m| edit(Box::new(move |r| r.start = m))));
         }
+        window.append(&gtk::Label::new(Some("–")));
         {
             let edit = edit.clone();
-            until.add_suffix(&time_box(rule.end, move |m| edit(Box::new(move |r| r.end = m))));
+            window.append(&super::time_box(rule.end, h24, move |m| edit(Box::new(move |r| r.end = m))));
         }
-        from.set_sensitive(!rule.all_day);
-        until.set_sensitive(!rule.all_day);
+        window.set_tooltip_text(Some("An end earlier than the start means after midnight"));
         {
-            let (edit, updating, from, until) = (edit.clone(), self.updating.clone(), from.clone(), until.clone());
-            all_day.connect_active_notify(move |s| {
+            let (edit, updating, window) = (edit.clone(), self.updating.clone(), window.clone());
+            all_day.connect_toggled(move |s| {
                 let on = s.is_active();
-                from.set_sensitive(!on);
-                until.set_sensitive(!on);
+                window.set_visible(!on);
                 if !updating.get() {
                     edit(Box::new(move |r| r.all_day = on));
                 }
             });
         }
-        row.add_row(&all_day);
-        row.add_row(&from);
-        row.add_row(&until);
-        row
+        wrap.append(&all_day);
+        wrap.append(&window);
+
+        // order + delete
+        let up = flat_button("go-up-symbolic", "Check this rule earlier");
+        let down = flat_button("go-down-symbolic", "Check this rule later");
+        let del = flat_button("user-trash-symbolic", "Delete rule");
+        up.set_sensitive(idx > 0);
+        down.set_sensitive(idx + 1 < total);
+        {
+            let (ctx, id) = (ctx.clone(), id.clone());
+            up.connect_clicked(move |_| ctx.move_rule(&id, -1));
+        }
+        {
+            let (ctx, id) = (ctx.clone(), id.clone());
+            down.connect_clicked(move |_| ctx.move_rule(&id, 1));
+        }
+        {
+            let (ctx, id) = (ctx.clone(), id.clone());
+            del.connect_clicked(move |_| ctx.remove_rule(&id));
+        }
+        for b in [&up, &down, &del] {
+            wrap.append(b);
+        }
+        gtk::ListBoxRow::builder().activatable(false).child(&wrap).build()
     }
 }
