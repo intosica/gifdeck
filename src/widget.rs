@@ -122,6 +122,13 @@ impl WidgetWindow {
         }
     }
 
+    pub fn view(&self) -> Option<AnimView> {
+        match &self.backing {
+            Backing::Hosted(host) => host.view(&self.cfg.id),
+            Backing::Window(_) => self.view.clone(),
+        }
+    }
+
     pub fn host(&self) -> Option<&Rc<LayerHost>> {
         match &self.backing {
             Backing::Hosted(h) => Some(h),
@@ -135,6 +142,9 @@ impl WidgetWindow {
         match &self.backing {
             Backing::Hosted(host) => {
                 host.set_opacity(&cfg.id, cfg.opacity);
+                if let Some(v) = host.view(&cfg.id) {
+                    v.set_mask_look(cfg.mask_opacity, cfg.mask_xf);
+                }
                 if moved {
                     host.set_position(&cfg.id, cfg.x, cfg.y);
                 }
@@ -142,6 +152,7 @@ impl WidgetWindow {
             Backing::Window(window) => {
                 if let Some(v) = &self.view {
                     v.set_opacity(cfg.opacity);
+                    v.set_mask_look(cfg.mask_opacity, cfg.mask_xf);
                 }
                 if moved && env.backend == Backend::X11 {
                     if let Some(xid) = x11::xid_of(window) {

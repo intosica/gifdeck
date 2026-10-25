@@ -144,6 +144,10 @@ impl LayerHost {
         }
     }
 
+    pub fn view(&self, id: &str) -> Option<AnimView> {
+        self.children.borrow().iter().find(|c| c.id == id).map(|c| c.view.clone())
+    }
+
     pub fn set_position(&self, id: &str, x: i32, y: i32) {
         if let Some(c) = self.children.borrow_mut().iter_mut().find(|c| c.id == id) {
             c.pos = (x, y);

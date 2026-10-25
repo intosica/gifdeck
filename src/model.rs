@@ -201,13 +201,38 @@ impl Storage {
     }
 }
 
-/// A saved PNG used as clipping mask (its alpha channel is the shape).
+/// A saved PNG or GIF used as clipping mask (its alpha channel is the shape).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 #[serde(default)]
 pub struct Mask {
     pub id: String,
     pub name: String,
     pub path: PathBuf,
+}
+
+/// How a widget's mask is placed over it and (when its opacity > 0) coloured.
+/// Offsets are fractions of the widget size; angles in degrees.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+pub struct MaskXf {
+    pub dx: f64,
+    pub dy: f64,
+    /// Uniform size, 1.0 = as big as the widget.
+    pub size: f64,
+    /// Extra stretch per axis (multiplies `size`).
+    pub sx: f64,
+    pub sy: f64,
+    pub skew_x: f64,
+    pub skew_y: f64,
+    pub hue: f64,
+    pub contrast: f64,
+    pub brightness: f64,
+}
+
+impl Default for MaskXf {
+    fn default() -> Self {
+        MaskXf { dx: 0.0, dy: 0.0, size: 1.0, sx: 1.0, sy: 1.0, skew_x: 0.0, skew_y: 0.0, hue: 0.0, contrast: 1.0, brightness: 0.0 }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -233,6 +258,9 @@ pub struct WidgetConfig {
     pub rotation: Rotation,
     /// Alpha mask (PNG path) clipping the widget.
     pub mask: Option<PathBuf>,
+    /// How visibly the mask itself is drawn over the widget; 0 = it only clips.
+    pub mask_opacity: f64,
+    pub mask_xf: MaskXf,
     /// While dragging, stick to the screen edges when close.
     pub snap_edges: bool,
     /// While dragging, never leave the screen.
@@ -256,6 +284,8 @@ impl Default for WidgetConfig {
             visible: true,
             rotation: Rotation::default(),
             mask: None,
+            mask_opacity: 0.0,
+            mask_xf: MaskXf::default(),
             snap_edges: false,
             keep_inside: false,
             app: None,
@@ -351,6 +381,7 @@ impl Rule {
 }
 
 /// "16:05" or "4:05 PM".
+#[allow(dead_code)] // formatted clock strings are only exercised by the unit tests for now
 pub fn fmt_time(m: u16, h24: bool) -> String {
     let (h, min) = ((m / 60) % 24, m % 60);
     if h24 {

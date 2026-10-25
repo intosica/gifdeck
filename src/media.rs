@@ -75,17 +75,6 @@ pub fn list_folder(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Small solid-black picture of a PNG's shape (its alpha channel), for mask previews.
-pub fn silhouette(path: &Path, size: u32) -> Option<gdk::Texture> {
-    let img = image::open(path).ok()?.thumbnail(size, size).into_rgba8();
-    let (w, h) = img.dimensions();
-    let mut raw = img.into_raw();
-    for px in raw.chunks_exact_mut(4) {
-        px[..3].fill(0);
-    }
-    Some(gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(raw), w as usize * 4).upcast())
-}
-
 pub fn is_png(path: &Path) -> bool {
     let mut magic = [0u8; 4];
     File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && magic == [0x89, b'P', b'N', b'G']

@@ -16,7 +16,7 @@ use gtk4_layer_shell::Layer;
 use crate::env::{Backend, Env, Role};
 use crate::layer_host::LayerHost;
 use crate::media;
-use crate::model::{self, Level, RotMode, Rotation, WidgetConfig};
+use crate::model::{self, Level, MaskXf, RotMode, Rotation, WidgetConfig};
 use crate::widget::{Backing, ClosedCb, MovedCb, WidgetWindow};
 
 /// Which file of a folder widget is showing, and when it changes.
@@ -55,6 +55,12 @@ pub struct Manager {
     on_moved: MovedCb,
     on_closed: ClosedCb,
     on_error: Rc<dyn Fn(&str, &str)>,
+    /// A mask transform was dragged (id, new transform, drag finished).
+    on_mask_xf: Rc<dyn Fn(&str, MaskXf)>,
+    /// The user touched the widget outside its mask: leave mask editing.
+    on_mask_exit: Rc<dyn Fn()>,
+    /// Widget whose mask handles are showing.
+    editing: RefCell<Option<String>>,
 }
 
 /// Changes that cannot be applied to an existing widget in place.
@@ -71,7 +77,7 @@ fn needs_rebuild(a: &WidgetConfig, b: &WidgetConfig) -> bool {
 }
 
 impl Manager {
-    pub fn new(app: adw::Application, env: Env, on_moved: MovedCb, on_closed: ClosedCb, on_error: Rc<dyn Fn(&str, &str)>) -> Rc<Manager> {
+    pub fn new(app: adw::Application, env: Env, on_moved: MovedCb, on_closed: ClosedCb, on_error: Rc<dyn Fn(&str, &str)>, on_mask_xf: Rc<dyn Fn(&str, MaskXf)>, on_mask_exit: Rc<dyn Fn()>) -> Rc<Manager> {
         Rc::new(Manager {
             app,
             env,
@@ -83,7 +89,31 @@ impl Manager {
             on_moved,
             on_closed,
             on_error,
+            on_mask_xf,
+            on_mask_exit,
+            editing: RefCell::new(None),
         })
+    }
+
+    /// Show the mask handles on widget `id` only (or none).
+    pub fn set_mask_edit(&self, id: Option<&str>) {
+        *self.editing.borrow_mut() = id.map(str::to_string);
+        for (wid, w) in self.widgets.borrow().iter() {
+            if let Some(v) = w.view() {
+                v.set_edit(id == Some(wid.as_str()));
+            }
+        }
+    }
+
+    /// Connect a freshly built / re-masked widget's view to the editor.
+    fn wire(&self, id: &str) {
+        let ws = self.widgets.borrow();
+        let Some(w) = ws.get(id) else { return };
+        let Some(v) = w.view() else { return };
+        let (cb, exit, wid) = (self.on_mask_xf.clone(), self.on_mask_exit.clone(), id.to_string());
+        v.set_hooks(Rc::new(move |xf, _| cb(&wid, xf)), exit);
+        v.set_mask_look(w.cfg.mask_opacity, w.cfg.mask_xf);
+        v.set_edit(self.editing.borrow().as_deref() == Some(id));
     }
 
     /// The user closed a decorated widget window with its close button: just drop our handle.
@@ -217,6 +247,7 @@ impl Manager {
                         Role::Toplevel => WidgetWindow::build_window(&this.app, &this.env, &cfg, &anim, mask, this.on_closed.clone()),
                     };
                     this.widgets.borrow_mut().insert(id.clone(), widget);
+                    this.wire(&id);
                     this.restack(Some(&id));
                 }
                 Err(msg) => (this.on_error)(&cfg.title(), &msg),
@@ -275,10 +306,10 @@ impl Manager {
                     Some(m) => media::load(m).await.ok(),
                     None => None,
                 };
-                let ws = this.widgets.borrow();
-                if let Some(w) = ws.get(&id) {
+                if let Some(w) = this.widgets.borrow().get(&id) {
                     w.set_media(&anim, mask);
                 }
+                this.wire(&id);
             });
         }
     }

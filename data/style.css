@@ -5,5 +5,3 @@ window.gifdeck-widget.background {
   background-color: transparent;
   box-shadow: none;
 }
-/* Mask previews are black silhouettes: give them a light plate so they show on dark themes. */
-.gifdeck-mask-preview { background: #e8e8e8; border-radius: 8px; padding: 4px; }

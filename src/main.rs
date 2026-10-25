@@ -5,6 +5,7 @@ mod autostart;
 mod ctx;
 mod env;
 mod layer_host;
+mod mask_xf;
 mod manager;
 mod media;
 mod model;
@@ -13,6 +14,8 @@ mod widget;
 mod x11;
 
 use std::cell::RefCell;
+use std::io::IsTerminal;
+use std::os::unix::process::CommandExt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,6 +27,48 @@ use ctx::{AppCtx, Refresh};
 
 static BACKGROUND: AtomicBool = AtomicBool::new(false);
 
+/// Re-exec ourselves in a new session with stdio on /dev/null, so the widgets outlive the
+/// terminal that started them. Returns true when a detached copy was spawned.
+///
+/// Skipped when there is no terminal (login autostart, app-grid launch) and when
+/// `GIFDECK_NO_DETACH` is set, so `cargo run` keeps its logs.
+fn detach_from_terminal() -> bool {
+    if std::env::var_os("GIFDECK_DETACHED").is_some() || std::env::var_os("GIFDECK_NO_DETACH").is_some() {
+        return false;
+    }
+    if !(std::io::stdout().is_terminal() || std::io::stderr().is_terminal()) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1))
+        .env("GIFDECK_DETACHED", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        // ponytail: setsid only, no double fork — the detached GTK process is adopted by init
+        // when the terminal's shell exits, which is all we need here.
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            println!(
+                "gifdeck: running detached (pid {}), widgets stay up when this terminal closes.\n          run `gifdeck` again to open the manager window, `gifdeck --background` after login.",
+                child.id()
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("gifdeck: could not detach ({e}), running in the foreground");
+            false
+        }
+    }
+}
+
 struct Running {
     ctx: Rc<AppCtx>,
     ui: Rc<ui::Ui>,
@@ -32,6 +77,9 @@ struct Running {
 }
 
 fn main() -> glib::ExitCode {
+    if detach_from_terminal() {
+        return glib::ExitCode::SUCCESS;
+    }
     let app = adw::Application::builder().application_id(autostart::APP_ID).build();
     app.add_main_option(
         "background",

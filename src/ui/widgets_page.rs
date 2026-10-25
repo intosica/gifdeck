@@ -12,6 +12,30 @@ use crate::media;
 use crate::model::{AppMode, Level, RotMode, SchedEntry, WidgetConfig};
 use super::app_picker;
 
+/// Keeps clicks on the mask controls from leaving mask-edit mode (see `Ui::new`).
+pub const XF_KEEP: &str = "gifdeck-xf-keep";
+
+struct XfRows {
+    id: String,
+    edit: adw::SwitchRow,
+    spins: Vec<(adw::SpinRow, fn(&WidgetConfig) -> f64)>,
+}
+
+type XfSpec = (&'static str, f64, f64, f64, fn(&WidgetConfig) -> f64, fn(&mut WidgetConfig, f64));
+
+/// Mask rows in display units (percent / degrees).
+const XF_SPECS: [XfSpec; 9] = [
+    ("Mask opacity (%) — 0 only clips", 0.0, 100.0, 5.0, |c| c.mask_opacity * 100.0, |c, v| c.mask_opacity = v / 100.0),
+    ("Mask size (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.size * 100.0, |c, v| c.mask_xf.size = v / 100.0),
+    ("Mask stretch width (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sx * 100.0, |c, v| c.mask_xf.sx = v / 100.0),
+    ("Mask stretch height (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sy * 100.0, |c, v| c.mask_xf.sy = v / 100.0),
+    ("Mask skew X (°)", -75.0, 75.0, 1.0, |c| c.mask_xf.skew_x, |c, v| c.mask_xf.skew_x = v),
+    ("Mask skew Y (°)", -75.0, 75.0, 1.0, |c| c.mask_xf.skew_y, |c, v| c.mask_xf.skew_y = v),
+    ("Mask hue (°)", -180.0, 180.0, 5.0, |c| c.mask_xf.hue, |c, v| c.mask_xf.hue = v),
+    ("Mask contrast (%)", 0.0, 300.0, 5.0, |c| c.mask_xf.contrast * 100.0, |c, v| c.mask_xf.contrast = v / 100.0),
+    ("Mask brightness (%)", -100.0, 100.0, 5.0, |c| c.mask_xf.brightness * 100.0, |c, v| c.mask_xf.brightness = v / 100.0),
+];
+
 pub struct WidgetsPage {
     ctx: Rc<AppCtx>,
     pub root: gtk::ScrolledWindow,
@@ -20,6 +44,8 @@ pub struct WidgetsPage {
     expanded: RefCell<HashSet<String>>,
     /// (widget id, x row, y row) so drags can update the numbers in place.
     pos_rows: RefCell<Vec<(String, adw::SpinRow, adw::SpinRow)>>,
+    /// Mask transform controls of each widget, so dragging on screen can update them in place.
+    xf_rows: RefCell<Vec<XfRows>>,
     /// Set while the UI itself changes controls, so handlers ignore those changes.
     updating: Rc<Cell<bool>>,
 }
@@ -85,6 +111,7 @@ impl WidgetsPage {
             list,
             expanded: RefCell::new(HashSet::new()),
             pos_rows: RefCell::new(Vec::new()),
+            xf_rows: RefCell::new(Vec::new()),
             updating: Rc::new(Cell::new(false)),
         });
 
@@ -159,6 +186,7 @@ impl WidgetsPage {
             self.list.remove(&child);
         }
         self.pos_rows.borrow_mut().clear();
+        self.xf_rows.borrow_mut().clear();
         let widgets = self.ctx.state.borrow().active_preset().widgets.clone();
         let total = widgets.len();
         for (i, cfg) in widgets.iter().enumerate() {
@@ -176,6 +204,30 @@ impl WidgetsPage {
                 xr.set_value(w.x as f64);
                 yr.set_value(w.y as f64);
             }
+        }
+        self.updating.set(false);
+    }
+
+    /// Mask transform changed on screen (or reset): update the numbers.
+    pub fn update_mask_xf(&self) {
+        self.updating.set(true);
+        let st = self.ctx.state.borrow();
+        for r in self.xf_rows.borrow().iter() {
+            if let Some(w) = st.active_preset().widgets.iter().find(|w| w.id == r.id) {
+                for (row, get) in &r.spins {
+                    row.set_value(get(w).round());
+                }
+            }
+        }
+        self.updating.set(false);
+    }
+
+    /// Mask-edit switches follow `ctx.edit_mask`.
+    pub fn update_mask_edit(&self) {
+        self.updating.set(true);
+        let on = self.ctx.edit_mask.borrow().clone();
+        for r in self.xf_rows.borrow().iter() {
+            r.edit.set_active(on.as_deref() == Some(r.id.as_str()));
         }
         self.updating.set(false);
     }
@@ -259,6 +311,26 @@ impl WidgetsPage {
         let mask_sel = cfg.mask.as_ref().and_then(|p| masks.iter().position(|m| &m.path == p)).map(|i| i as u32 + 1).unwrap_or(0);
         let mask = adw::ComboRow::builder().title("Alpha mask").subtitle("Clip the widget to a saved shape (Masks tab)").model(&gtk::StringList::new(&mask_names)).selected(mask_sel).build();
 
+        // Mask look + on-screen transform; only useful with a mask chosen.
+        let edit_sw = adw::SwitchRow::builder().title("Transform mask on screen").subtitle("Drag handles on the widget; turns off when you click anything else").active(self.ctx.edit_mask.borrow().as_deref() == Some(id.as_str())).build();
+        let xf_reset = gtk::Button::builder().label("Reset").valign(gtk::Align::Center).tooltip_text("Back to the default mask placement and colours").build();
+        edit_sw.add_suffix(&xf_reset);
+        let xf_spins: Vec<(adw::SpinRow, XfSpec)> = XF_SPECS
+            .iter()
+            .map(|sp| {
+                let r = adw::SpinRow::with_range(sp.1, sp.2, sp.3);
+                r.set_title(sp.0);
+                r.set_value(sp.4(cfg).round());
+                (r, *sp)
+            })
+            .collect();
+        let mask_rows: Vec<gtk::Widget> = std::iter::once(edit_sw.clone().upcast()).chain(xf_spins.iter().map(|(r, _)| r.clone().upcast())).collect();
+        for r in &mask_rows {
+            r.add_css_class(XF_KEEP);
+            r.set_sensitive(cfg.mask.is_some());
+        }
+        self.xf_rows.borrow_mut().push(XfRows { id: id.clone(), edit: edit_sw.clone(), spins: xf_spins.iter().map(|(r, sp)| (r.clone(), sp.4)).collect() });
+
         // Application rule.
         let app_mode = adw::ComboRow::builder()
             .title("Application rule")
@@ -284,9 +356,12 @@ impl WidgetsPage {
             snap.clone().upcast(),
             keep.clone().upcast(),
             mask.clone().upcast(),
+        ];
+        rows.extend(mask_rows.iter().cloned());
+        rows.extend([
             app_mode.clone().upcast(),
             app_row.clone().upcast(),
-        ];
+        ]);
         // Folder widgets: rotation.
         let rot = &cfg.rotation;
         let rot_mode = adw::ComboRow::builder().title("Rotation").model(&gtk::StringList::new(&RotMode::ALL.map(|m| m.label()))).selected(rot.mode.index()).build();
@@ -374,9 +449,40 @@ impl WidgetsPage {
         on_change!(connect_active_notify, keep, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.keep_inside = on });
         {
             let paths: Vec<std::path::PathBuf> = masks.iter().map(|m| m.path.clone()).collect();
+            let ctx = ctx.clone();
             on_change!(connect_selected_notify, mask, |s, c| {
                 let p = (s.selected() as usize).checked_sub(1).and_then(|i| paths.get(i).cloned());
+                let rows = mask_rows.clone();
+                for r in &rows {
+                    r.set_sensitive(p.is_some());
+                }
+                if p.is_none() {
+                    ctx.set_mask_edit(None);
+                }
                 move |c: &mut WidgetConfig| c.mask = p
+            });
+        }
+        for (r, sp) in &xf_spins {
+            let set = sp.5;
+            on_change!(connect_value_notify, r, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| set(c, v) });
+        }
+        {
+            let (ctx, id, updating) = (ctx.clone(), id.clone(), updating.clone());
+            edit_sw.connect_active_notify(move |s| {
+                if !updating.get() {
+                    ctx.set_mask_edit(s.is_active().then(|| id.clone()));
+                }
+            });
+        }
+        {
+            let (ctx, id, this) = (ctx.clone(), id.clone(), Rc::downgrade(self));
+            xf_reset.connect_clicked(move |_| {
+                ctx.edit_widget(&id, |c| {
+                    c.mask_xf = Default::default();
+                });
+                if let Some(this) = this.upgrade() {
+                    this.update_mask_xf();
+                }
             });
         }
         {
@@ -444,7 +550,7 @@ impl SchedEditor {
         let h24 = self.ctx.state.borrow().time_24h;
         let entries = self.ctx.widget_cfg(&self.id).map(|c| c.rotation.schedule).unwrap_or_default();
         for (i, e) in entries.iter().enumerate() {
-            let line = adw::WrapBox::builder().child_spacing(8).line_spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
+            let line = super::wrap_row(6);
             let (ctx, id) = (self.ctx.clone(), self.id.clone());
             line.append(&super::time_box(e.start, h24, move |m| ctx.edit_widget(&id, move |c| {
                 if let Some(e) = c.rotation.schedule.get_mut(i) {

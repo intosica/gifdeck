@@ -308,6 +308,7 @@ dependencies = [
  "gtk4-layer-shell",
  "image",
  "libadwaita",
+ "libc",
  "serde",
  "serde_json",
  "x11rb",

@@ -1,11 +1,11 @@
-//! "Masks" page: saved PNG shapes that widgets can be clipped to.
-//! Every mask is previewed as a solid black silhouette of its alpha channel.
+//! "Masks" page: saved GIF / PNG shapes that widgets can be clipped to (animated ones play).
 
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::anim_view::AnimView;
 use crate::ctx::AppCtx;
 use crate::media;
 
@@ -19,7 +19,7 @@ impl MasksPage {
     pub fn new(ctx: &Rc<AppCtx>) -> Rc<MasksPage> {
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
         let hint = gtk::Label::builder()
-            .label("No masks yet.\nPress Add or drop PNG files here.\nOnly the shape (alpha channel) of a PNG counts.")
+            .label("No masks yet.\nPress Add or drop GIF or PNG files here.\nThe alpha channel is the shape; animated GIFs animate it.")
             .justify(gtk::Justification::Center)
             .css_classes(["dim-label"])
             .margin_top(24)
@@ -45,8 +45,9 @@ impl MasksPage {
             let ctx = ctx.clone();
             add.connect_clicked(move |btn| {
                 let filter = gtk::FileFilter::new();
-                filter.set_name(Some("PNG images"));
+                filter.set_name(Some("GIF and PNG images"));
                 filter.add_mime_type("image/png");
+                filter.add_mime_type("image/gif");
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
                 let dialog = gtk::FileDialog::builder().title("Add alpha masks").modal(true).filters(&filters).default_filter(&filter).build();
@@ -71,11 +72,23 @@ impl MasksPage {
         let masks = self.ctx.state.borrow().masks.clone();
         for m in masks {
             let row = adw::ActionRow::builder().title(glib::markup_escape_text(&m.name)).subtitle(glib::markup_escape_text(&m.path.to_string_lossy())).build();
-            let preview = gtk::Image::builder().pixel_size(48).css_classes(["gifdeck-mask-preview"]).build();
-            match media::silhouette(&m.path, 96) {
-                Some(t) => preview.set_paintable(Some(&t)),
-                None => preview.set_icon_name(Some("image-missing-symbolic")),
-            }
+            let preview = gtk::Box::builder().width_request(56).height_request(56).valign(gtk::Align::Center).build();
+            let path = m.path.clone();
+            let slot = preview.clone();
+            glib::spawn_future_local(async move {
+                match media::load(path).await {
+                    Ok(anim) => {
+                        let k = (56.0 / anim.width.max(anim.height) as f64).min(1.0);
+                        let view = AnimView::new(anim.clone(), ((anim.width as f64 * k).round() as i32).max(1), ((anim.height as f64 * k).round() as i32).max(1), None);
+                        view.set_halign(gtk::Align::Center);
+                        view.set_valign(gtk::Align::Center);
+                        view.set_hexpand(true);
+                        view.play();
+                        slot.append(&view);
+                    }
+                    Err(_) => slot.append(&gtk::Image::from_icon_name("image-missing-symbolic")),
+                }
+            });
             row.add_prefix(&preview);
             let del = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Remove mask").valign(gtk::Align::Center).css_classes(["flat"]).build();
             let (ctx, id) = (self.ctx.clone(), m.id.clone());

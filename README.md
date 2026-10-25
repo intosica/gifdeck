@@ -24,7 +24,7 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Click-through** instead of locking; per-widget *snap to edges* / *keep inside screen* (layer-shell).
 - **Folder widgets**: rotate sequentially, randomly (min/max seconds) or on a schedule.
 - **Drag & drop** files/folders onto the window to import (onto the Masks tab: PNG masks).
-- **Masks** tab: PNG alpha masks shown as black silhouettes; apply per widget.
+- **Masks** tab: GIF or PNG alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 - **Single-row schedule** with 24h/12h toggle.
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
@@ -116,6 +116,15 @@ Permissions are minimal: Wayland, fallback X11, IPC, DRI. No filesystem, no netw
 
 Needs Rust ≥ 1.85, GTK ≥ 4.10, libadwaita ≥ 1.4, and **gtk4-layer-shell ≥ 1.0** (build from source if
 your distro lacks it: `meson setup build -Dexamples=false -Ddocs=false -Dtests=false -Dsmoke-tests=false -Dintrospection=false -Dvapi=false`).
+
+Install it, system-wide (`--prefix /usr/local`) or for one user (default `~/.local`):
+
+```bash
+./install.sh              # build + install binary, icon, desktop entry
+./install.sh --uninstall  # remove them again (config and media are kept)
+```
+
+Development run:
 
 ```bash
 cargo run                 # shows the manager window

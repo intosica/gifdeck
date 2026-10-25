@@ -97,6 +97,29 @@ impl Ui {
             .default_height(720)
             .content(&toasts)
             .build();
+        // Mask editing ends as soon as the user clicks anything but the mask controls.
+        let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.set_button(0);
+        {
+            let ctx = ctx.clone();
+            let win = window.downgrade();
+            click.connect_pressed(move |_, _, x, y| {
+                if ctx.edit_mask.borrow().is_none() {
+                    return;
+                }
+                let Some(win) = win.upgrade() else { return };
+                let mut w = win.pick(x, y, gtk::PickFlags::DEFAULT);
+                while let Some(cur) = w {
+                    if cur.has_css_class(widgets_page::XF_KEEP) {
+                        return;
+                    }
+                    w = cur.parent();
+                }
+                ctx.set_mask_edit(None);
+            });
+        }
+        window.add_controller(click);
         // Closing the manager keeps the widgets (and the process) alive.
         window.set_hide_on_close(true);
 
@@ -115,6 +138,8 @@ impl Ui {
         match what {
             Refresh::Widgets => self.widgets.rebuild(),
             Refresh::Positions => self.widgets.update_positions(),
+            Refresh::MaskXf => self.widgets.update_mask_xf(),
+            Refresh::MaskEdit => self.widgets.update_mask_edit(),
             Refresh::Names => {
                 self.widgets.update_presets();
                 self.presets.rebuild_rules();
@@ -136,6 +161,24 @@ impl Ui {
             }
         }
     }
+}
+
+/// Horizontal row of controls that wraps onto a second line when the window is narrow.
+/// ponytail: gtk::FlowBox instead of adw::WrapBox — WrapBox needs libadwaita 1.7, this machine ships 1.5.
+/// Swap back once the distro has libadwaita ≥ 1.7 (and restore the v1_7 feature in Cargo.toml).
+pub(super) fn wrap_row(top: i32) -> gtk::FlowBox {
+    gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(false)
+        .max_children_per_line(u32::MAX)
+        .column_spacing(8)
+        .row_spacing(6)
+        .valign(gtk::Align::Center)
+        .margin_top(top)
+        .margin_bottom(top)
+        .margin_start(12)
+        .margin_end(12)
+        .build()
 }
 
 /// Time-of-day editor returning minutes since midnight: "16 : 05", or "4 : 05 PM" when `h24` is off.

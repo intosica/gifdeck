@@ -201,7 +201,7 @@ impl PresetsPage {
         let ctx = self.ctx.clone();
         let id = rule.id.clone();
         let h24 = ctx.state.borrow().time_24h;
-        let wrap = adw::WrapBox::builder().child_spacing(8).line_spacing(6).margin_top(8).margin_bottom(8).margin_start(12).margin_end(12).build();
+        let wrap = super::wrap_row(8);
         let edit = {
             let (ctx, id) = (ctx.clone(), id.clone());
             Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| ctx.edit_rule(&id, f))

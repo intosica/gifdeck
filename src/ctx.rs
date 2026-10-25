@@ -15,7 +15,7 @@ use gtk::{gio, glib};
 use crate::env::Env;
 use crate::manager::Manager;
 use crate::media;
-use crate::model::{self, AppRef, AppState, Mask, Preset, Rule, Storage, Win, WidgetConfig};
+use crate::model::{self, AppRef, AppState, Mask, MaskXf, Preset, Rule, Storage, Win, WidgetConfig};
 
 /// What the UI should redraw.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,6 +28,10 @@ pub enum Refresh {
     Names,
     /// Mask list changed.
     Masks,
+    /// A mask transform changed by dragging: update the number fields.
+    MaskXf,
+    /// Which widget is in mask-edit mode changed.
+    MaskEdit,
     /// The rule list was restructured.
     Schedule,
     /// Master switch changed.
@@ -53,6 +57,8 @@ pub struct AppCtx {
     last_scheduled: RefCell<Option<Option<String>>>,
     /// Other applications' windows as of the last poll (X11).
     wins: RefCell<Vec<Win>>,
+    /// Widget whose mask is being transformed on screen.
+    pub edit_mask: RefCell<Option<String>>,
 }
 
 /// Put `src` (file or folder) where `storage` says; returns the path the widget should use.
@@ -103,8 +109,22 @@ impl AppCtx {
                     ctx.toast(&format!("Could not load {name}: {msg}"));
                 }
             });
+            let w = weak.clone();
+            let on_mask_xf: Rc<dyn Fn(&str, MaskXf)> = Rc::new(move |id, xf| {
+                if let Some(ctx) = w.upgrade() {
+                    ctx.edit_widget(id, |c| c.mask_xf = xf);
+                    ctx.refresh(Refresh::MaskXf);
+                }
+            });
+            let w = weak.clone();
+            let on_mask_exit: Rc<dyn Fn()> = Rc::new(move || {
+                if let Some(ctx) = w.upgrade() {
+                    ctx.set_mask_edit(None);
+                }
+            });
             AppCtx {
-                manager: Manager::new(app.clone(), env.clone(), on_moved, on_closed, on_error),
+                edit_mask: RefCell::new(None),
+                manager: Manager::new(app.clone(), env.clone(), on_moved, on_closed, on_error, on_mask_xf, on_mask_exit),
                 app,
                 env,
                 state: RefCell::new(AppState::load()),
@@ -235,13 +255,23 @@ impl AppCtx {
         self.commit();
     }
 
+    /// Turn the on-screen mask handles on for widget `id`, or off for all.
+    pub fn set_mask_edit(&self, id: Option<String>) {
+        if *self.edit_mask.borrow() == id {
+            return;
+        }
+        self.manager.set_mask_edit(id.as_deref());
+        *self.edit_mask.borrow_mut() = id;
+        self.refresh(Refresh::MaskEdit);
+    }
+
     /// Open a widget for each picked file or folder (a folder becomes one rotating widget).
     /// Where the file lives afterwards follows the storage setting.
     pub fn import_files(self: &Rc<Self>, files: Vec<gio::File>) {
         self.import(files, false);
     }
 
-    /// Save the picked PNGs as alpha masks.
+    /// Save the picked GIFs / PNGs as alpha masks.
     pub fn import_masks(self: &Rc<Self>, files: Vec<gio::File>) {
         self.import(files, true);
     }
@@ -258,10 +288,10 @@ impl AppCtx {
                 };
                 let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let folder = src.is_dir();
-                let ok = if masks { !folder && media::is_png(&src) } else if folder { !media::list_folder(&src).is_empty() } else { media::is_supported(&src) };
+                let ok = if masks { !folder && media::is_supported(&src) } else if folder { !media::list_folder(&src).is_empty() } else { media::is_supported(&src) };
                 if !ok {
                     this.toast(&match (masks, folder) {
-                        (true, _) => format!("{name} is not a PNG image."),
+                        (true, _) => format!("{name} is not a GIF or PNG image."),
                         (false, true) => format!("{name} has no GIF or PNG files."),
                         (false, false) => format!("{name} is not a GIF or PNG image."),
                     });
