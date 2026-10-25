@@ -1,0 +1,7 @@
+/* Widget windows draw only the picture: no window background, no shadow. */
+window.gifdeck-widget,
+window.gifdeck-widget.background {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+}

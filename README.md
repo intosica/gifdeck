@@ -1,0 +1,152 @@
+# GifDeck
+
+Animated **GIF / PNG widgets** for your desktop. One small manager window, **one process**,
+any number of independent transparent widgets. Runs on **X11/Xorg** and on **Wayland
+compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
+
+## Features
+
+| Requirement | How it is done |
+|---|---|
+| One process, many widgets | `Manager` owns every widget `gtk::Window` inside the single GTK application. Nothing is ever spawned. |
+| GIF + PNG | `media.rs`: own GIF decoder loop (correct disposal + transparency), `png` for stills. Files are copied into the app's data folder on import. |
+| Alpha transparency | Straight-alpha `gdk::MemoryTexture`s, windows with a transparent CSS background. |
+| Light on CPU/GPU | Frames are decoded once (on a worker thread) and uploaded once as textures. Each frame change is one `queue_draw()` driven by a one-shot timer, so a 10 fps GIF wakes the process 10×/s. Identical files share textures. |
+| Decorations on/off per widget | `decorated` flag → normal titled window, or borderless + transparent. |
+| Always on top / desktop layer per widget | X11: EWMH `_NET_WM_STATE_ABOVE` / `_BELOW`. Wayland: layer-shell `Top` / `Bottom` layer. |
+| Layer priority by list order | Top of the list = front. X11: windows raised back→front inside their EWMH layer. Wayland: all widgets of a layer are drawn in **one shared layer surface** (`layer_host.rs`) that stacks them in exactly list order. |
+| Presets | A preset is a named, ordered set of widgets; one is active; editing edits the active preset. |
+| Weekday / time-of-day schedule | Rules `preset + days + (all day or from–until)`, first match wins, overnight windows supported (`22:00–06:00` belongs to the day it starts on). |
+| Start at login | Flatpak: Background portal. Native: `~/.config/autostart` entry. UI switch reflects the real outcome. |
+| COSMIC vs X11 detection | `env.rs` inspects the GDK display type, `XDG_CURRENT_DESKTOP`, layer-shell support and compositing; the Settings page shows it and the widget UI warns when a combination is limited. |
+
+## Why GTK4 + gtk4-layer-shell (and not libcosmic)
+
+The hard part of this app is **window layering and placement**, not the look of the
+manager window. Needs: transparent borderless windows, per-window "above" / "below",
+absolute placement, on **both** X11 and Wayland, from one binary.
+
+* **GTK4** picks Wayland or X11 at runtime, so one binary and one code path for rendering.
+  GTK apps run natively on COSMIC.
+* **gtk4-layer-shell** gives wlr-layer-shell surfaces (the protocol COSMIC's compositor, sway,
+  Hyprland, … implement). On X11 the same windows get EWMH hints instead (`x11.rs`).
+* **libcosmic** (iced) would give the native COSMIC look. I did **not** build against it, so treat the
+  following as an informed caution rather than a tested fact: as far as I know its layer-surface support
+  lives in the Wayland-only (sctk) runtime, separate from the winit runtime that X11 needs, which makes
+  "one binary, both X11 and layer-shell" awkward. Check current libcosmic before choosing it.
+* Trade-off accepted: the manager window uses libadwaita, so it looks GNOME-ish on COSMIC.
+  The widgets themselves (the part you look at all day) are just your images.
+
+## What a widget becomes, per session
+
+| Session | Borderless, Always-on-top | Borderless, Desktop | Normal layer / decorated |
+|---|---|---|---|
+| **X11 / Xorg** | window + `ABOVE` | window + `BELOW` | window (+ WM frame) |
+| **Wayland + layer-shell** (COSMIC, sway, Hyprland) | layer surface, `Top` | layer surface, `Bottom` | ordinary toplevel (compositor places it) |
+| **Wayland, no layer-shell** (GNOME) | ordinary window, layer ignored | ordinary window, layer ignored | ordinary toplevel |
+
+Position can be set/remembered on X11 and for layer-shell widgets. Wayland places ordinary
+windows itself, so the UI says so instead of pretending.
+
+### Stacking order inside a layer (a gotcha worth knowing)
+
+The layer-shell protocol only orders *layers* (background < bottom < top < overlay). The order of surfaces
+**within** a layer is up to the compositor, and I measured it: with one surface per widget, sway stacked two
+overlapping widgets differently from run to run and inverted my re-map attempts. So a user-defined priority order
+cannot be built on top of "one surface per widget".
+
+GifDeck therefore creates **one layer surface per layer** (at most two: Top and Bottom), covers the output, and draws the
+widgets inside it as GTK children in list order. Its *input region* is only the union of the widgets' rectangles, so everything
+between widgets still reaches the desktop below. Side benefits: no re-map flicker, fewer surfaces, and dragging is just moving
+a child (the surface never moves, so the pointer coordinates stay valid for the whole grab).
+
+Still compositor-defined: the order of *ordinary* Wayland windows (decorated / "Normal layer" widgets), which no client can control.
+
+## Project layout
+
+```
+gifdeck/
+├── Cargo.toml / Cargo.lock
+├── src/
+│   ├── main.rs         app startup, --background flag, timers (schedule 15 s, X11 position poll 3 s)
+│   ├── env.rs          X11/Wayland/COSMIC/layer-shell detection; "what can this widget do here?"
+│   ├── model.rs        WidgetConfig, Preset, Rule (+ schedule matching), AppState JSON persistence   [unit-tested]
+│   ├── media.rs        GIF/PNG decoding, memory budget, texture cache                               [unit-tested]
+│   ├── anim_view.rs    custom GtkWidget: draws the current frame scaled, one-shot-timer animation
+│   ├── widget.rs       one widget: its own window (X11 + EWMH, or Wayland toplevel) or hosted in a layer surface
+│   ├── layer_host.rs   shared layer-shell surface per layer: deterministic stacking, input region, dragging
+│   ├── x11.rs          EWMH hints, raise, move, frame-aware position (x11rb, 2nd connection, same process)
+│   ├── manager.rs      owns all windows; sync() reconciles them with the active preset; restack
+│   ├── ctx.rs          the only place that mutates state: presets, rules, import, scheduler
+│   ├── autostart.rs    Background portal request (async, with Response) / autostart .desktop file
+│   └── ui/             libadwaita window: Widgets, Presets (+ schedule), Settings pages
+├── data/               .desktop, AppStream metainfo, icon, style.css
+└── flatpak/            manifest, launcher, build script, cargo-sources.json
+```
+
+Data flow: `UI → AppCtx (mutate + save) → Manager.sync() → windows`, and back via `Refresh` events.
+Config: `~/.var/app/dev.gifdeck.GifDeck/config/gifdeck/state.json`; imported images in `.../data/gifdeck/media/`.
+
+## Build and run
+
+### As a Flatpak
+
+```bash
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+sudo apt install flatpak-builder        # or: flatpak install flathub org.flatpak.Builder
+./flatpak/build.sh                      # add --bundle to also produce gifdeck.flatpak
+flatpak run dev.gifdeck.GifDeck
+```
+
+Flatpak builds are offline: after changing dependencies run `flatpak/update-cargo-sources.sh`.
+Permissions are minimal: Wayland, fallback X11, IPC, DRI. No filesystem, no network.
+
+### Natively (development)
+
+Needs Rust ≥ 1.85, GTK ≥ 4.10, libadwaita ≥ 1.4, and **gtk4-layer-shell ≥ 1.0** (build from source if
+your distro lacks it: `meson setup build -Dexamples=false -Ddocs=false -Dtests=false -Dsmoke-tests=false -Dintrospection=false -Dvapi=false`).
+
+```bash
+cargo run                 # shows the manager window
+cargo run -- --background # widgets only (what autostart uses)
+cargo test
+```
+
+## What was verified (and what was not)
+
+Tested in a sandbox, not on a real desktop:
+
+* `cargo test`: 10 unit tests (schedule incl. overnight wrap, GIF disposal/transparency/timing, PNG alpha, memory budget, persistence).
+* **X11** (Xvfb + openbox): `_NET_WM_STATE_ABOVE` / `_BELOW` set, skip-taskbar, positions honoured and stable across restarts
+  (found and fixed a title-bar-height drift), stacking order follows list order, single process.
+* **Wayland layer-shell** (headless sway): real alpha transparency over a coloured background; Top-layer widgets above and
+  Bottom-layer widgets below ordinary windows; **list order = stacking order**, checked with overlapping static discs at startup and after
+  clicking up/down in the UI; dragging with a simulated pointer lands exactly where expected; presses on empty desktop do nothing and the
+  manager window underneath stays clickable (input region works). Found along the way: within-layer order is compositor-defined
+  (see above), pointer coordinates during a grab are relative to the surface's *original* position, and layer windows must be resizable.
+* Release build: 1.3 MiB stripped; about 40 MiB resident with four animated widgets on software rendering.
+* UI flows driven with simulated input: add GIF/PNG through the file dialog, remove (orphan files deleted), add/expand schedule rules,
+  scheduled preset switching, autostart file toggle.
+
+**Not verified** (be sceptical until you try them):
+
+* **COSMIC itself.** Sway implements the same layer-shell protocol; COSMIC's compositor may differ in details (input-region handling,
+  fractional scaling, which output a layer surface lands on).
+* **The Flatpak build** (no Flathub access in the sandbox): the manifest parses in `flatpak-builder`, and the C library build recipe was run
+  natively, but the full sandboxed build, GNOME 50 SDK contents, and the launcher were not.
+* **The Background portal path** for autostart (only the native desktop-file path ran). Whether COSMIC's portal backend answers
+  `RequestBackground` is unconfirmed; the UI reports failures and reverts the switch.
+* Real GPU rendering, HiDPI/fractional scaling, multi-monitor.
+
+## Known limitations
+
+* Wayland: ordinary (non-layer) windows can't be positioned or layered by any app; decorated widgets can't be pinned above/below.
+* A layer surface covers one output (the compositor's choice), so layered widgets live on one monitor; no per-monitor choice yet.
+* No compositing on X11 → transparent areas are opaque (Settings page says so).
+* Very large GIFs are down-scaled to a 192 MiB decoded budget (`media::BUDGET_BYTES`).
+* Replace the placeholder app id `dev.gifdeck.GifDeck` and homepage URL in the metainfo before publishing.
+
+## Ideas for later
+
+Per-monitor placement · tray/status-notifier icon to reopen the manager · APNG/WebP · "ping-pong" and speed controls ·
+snap-to-edges · export/import of presets.

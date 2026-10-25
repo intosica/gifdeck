@@ -1,0 +1,61 @@
+app-id: dev.gifdeck.GifDeck
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable   # resolves to the 25.08 branch that GNOME 50 is based on
+command: gifdeck
+
+finish-args:
+  # Display: Wayland first (COSMIC, sway, Hyprland, GNOME...), X11 only when there is no Wayland.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc            # X11 shared memory
+  - --device=dri           # GPU rendering
+  # Deliberately absent: --filesystem=*, --share=network.
+  #  * Images are picked through the file chooser portal and copied into the app's own data folder.
+  #  * "Start at login" goes through the Background portal (no access to ~/.config/autostart needed).
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # Fallback in case a library was installed into a multiarch directory instead of /app/lib.
+  append-pkg-config-path: /app/lib/x86_64-linux-gnu/pkgconfig:/app/lib/aarch64-linux-gnu/pkgconfig
+  env:
+    CARGO_HOME: /run/build/gifdeck/cargo
+
+modules:
+  # Not part of the GNOME runtime. Provides wlr-layer-shell support for GTK4 windows.
+  - name: gtk4-layer-shell
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Dexamples=false
+      - -Ddocs=false
+      - -Dtests=false
+      - -Dsmoke-tests=false
+      - -Dintrospection=false
+      - -Dvapi=false
+    post-install:
+      # Fail here, with a clear message, if the library or its .pc file did not get installed.
+      - ls -l /app/lib/libgtk4-layer-shell.so* /app/lib/pkgconfig/gtk4-layer-shell-0.pc
+      - pkg-config --modversion gtk4-layer-shell-0
+    sources:
+      - type: archive
+        url: https://github.com/wmww/gtk4-layer-shell/archive/refs/tags/v1.3.0.tar.gz
+        sha256: 1ebb01ab14e98afd1727f68f64981c37bd23305b1f131f5667c02b94cf593192
+
+  - name: gifdeck
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --verbose
+      - install -Dm755 target/release/gifdeck /app/libexec/gifdeck
+      - install -Dm755 flatpak/gifdeck-launcher.sh /app/bin/gifdeck
+      - install -Dm644 data/dev.gifdeck.GifDeck.desktop /app/share/applications/dev.gifdeck.GifDeck.desktop
+      - install -Dm644 data/dev.gifdeck.GifDeck.metainfo.xml /app/share/metainfo/dev.gifdeck.GifDeck.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/dev.gifdeck.GifDeck.svg /app/share/icons/hicolor/scalable/apps/dev.gifdeck.GifDeck.svg
+    sources:
+      - type: dir
+        path: ..
+        skip: [target, .git, flatpak/build-dir, flatpak/.flatpak-builder, flatpak/repo]
+      - cargo-sources.json

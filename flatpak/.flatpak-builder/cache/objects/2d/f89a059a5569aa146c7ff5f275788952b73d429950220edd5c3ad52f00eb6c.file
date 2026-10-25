@@ -1,0 +1,5 @@
+[Runtime]
+name=dev.gifdeck.GifDeck.Debug
+
+[ExtensionOf]
+ref=app/dev.gifdeck.GifDeck/x86_64/master
