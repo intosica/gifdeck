@@ -24,7 +24,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::anim_view::AnimView;
 use crate::media::Anim;
 use crate::model::WidgetConfig;
-use crate::widget::{scaled_size, MovedCb};
+use crate::widget::{placed_size, scaled_size, MovedCb};
 
 struct Child {
     id: String,
@@ -110,8 +110,10 @@ impl LayerHost {
     /// Add (or replace) a widget. New widgets go to the front until `reorder` is called.
     pub fn upsert(&self, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
         self.remove(&cfg.id);
-        let (w, h) = scaled_size(anim, cfg.scale);
-        let view = AnimView::new(anim.clone(), w, h, mask);
+        let (cw, ch) = scaled_size(anim, cfg.scale);
+        let (w, h) = placed_size(anim, cfg.scale, cfg.angle);
+        let view = AnimView::new(anim.clone(), cw, ch, mask);
+        view.set_angle(cfg.angle);
         view.set_opacity(cfg.opacity);
         view.play();
         if !cfg.click_through {
@@ -125,9 +127,10 @@ impl LayerHost {
     /// Show another picture in an existing widget (folder rotation).
     pub fn replace_anim(&self, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
         if let Some(c) = self.children.borrow_mut().iter_mut().find(|c| c.id == cfg.id) {
-            let (w, h) = scaled_size(anim, cfg.scale);
-            c.size = (w, h);
-            c.view.set_anim(anim.clone(), w, h, mask);
+            let (cw, ch) = scaled_size(anim, cfg.scale);
+            c.size = placed_size(anim, cfg.scale, cfg.angle);
+            c.view.set_anim(anim.clone(), cw, ch, mask);
+            c.view.set_angle(cfg.angle);
             c.view.play();
         }
         self.update_input_region();

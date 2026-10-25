@@ -23,9 +23,16 @@ use crate::model::MaskXf;
 /// Called with the new transform; `true` once the drag is finished.
 pub type XfCb = Rc<dyn Fn(MaskXf, bool)>;
 
-fn transform(xf: &MaskXf, w: i32, h: i32) -> gsk::Transform {
-    let a = Affine::of(xf, w as f64, h as f64);
+fn gsk_of(a: &Affine) -> gsk::Transform {
     gsk::Transform::new().matrix(&graphene::Matrix::from_2d(a.0, a.1, a.2, a.3, a.4, a.5))
+}
+
+/// The picture (`cw × ch`) turned by `deg` and centred in the widget's `w × h` allocation.
+fn to_view(deg: f64, cw: f64, ch: f64, w: f64, h: f64) -> Affine {
+    let mut a = mask_xf::spin(deg, cw, ch);
+    a.4 += (w - cw) / 2.0;
+    a.5 += (h - ch) / 2.0;
+    a
 }
 
 mod imp {
@@ -41,6 +48,8 @@ mod imp {
         pub mask_frame: Cell<usize>,
         pub mask_opacity: Cell<f64>,
         pub xf: Cell<MaskXf>,
+        /// Rotation of the whole picture, in degrees.
+        pub angle: Cell<f64>,
         /// Mask transform handles are shown and draggable.
         pub edit: Cell<bool>,
         pub grab: Cell<Option<(Handle, MaskXf, (f64, f64))>>,
@@ -74,9 +83,13 @@ mod imp {
                     }
                     let (w, h) = v.imp().size.get();
                     let xf = v.imp().xf.get();
-                    match mask_xf::hit(&xf, w as f64, h as f64, (x, y)) {
+                    let p = match v.to_content((x, y)) {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    match mask_xf::hit(&xf, w as f64, h as f64, p) {
                         Some(handle) => {
-                            v.imp().grab.set(Some((handle, xf, (x, y))));
+                            v.imp().grab.set(Some((handle, xf, p)));
                             g.set_state(gtk::EventSequenceState::Claimed);
                         }
                         None => {
@@ -96,7 +109,8 @@ mod imp {
                     let Some(v) = v.upgrade() else { return };
                     let Some((handle, xf0, p0)) = v.imp().grab.get() else { return };
                     let (w, h) = v.imp().size.get();
-                    v.imp().xf.set(mask_xf::drag(handle, &xf0, w as f64, h as f64, p0, (ox, oy)));
+                    let d = v.from_view((ox, oy));
+                    v.imp().xf.set(mask_xf::drag(handle, &xf0, w as f64, h as f64, p0, d));
                     v.queue_draw();
                 }
             });
@@ -123,11 +137,13 @@ mod imp {
                         return;
                     }
                     let (w, h) = v.imp().size.get();
-                    let name = match mask_xf::hit(&v.imp().xf.get(), w as f64, h as f64, (x, y)) {
+                    let Some(p) = v.to_content((x, y)) else { return };
+                    let name = match mask_xf::hit(&v.imp().xf.get(), w as f64, h as f64, p) {
                         Some(Handle::Body) => "move",
                         Some(Handle::Corner(i)) => if i % 2 == 0 { "nwse-resize" } else { "nesw-resize" },
                         Some(Handle::Edge(i)) => if i % 2 == 0 { "ns-resize" } else { "ew-resize" },
                         Some(Handle::Skew(i)) => if i % 2 == 0 { "col-resize" } else { "row-resize" },
+                        Some(Handle::Rotate) => "grabbing",
                         None => "default",
                     };
                     v.set_cursor_from_name(Some(name));
@@ -139,26 +155,33 @@ mod imp {
 
     impl WidgetImpl for AnimView {
         fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
-            let (w, h) = self.size.get();
-            let v = if orientation == gtk::Orientation::Horizontal { w } else { h };
+            let (w, h) = mask_xf::bbox(self.angle.get(), self.size.get().0 as f64, self.size.get().1 as f64);
+            let v = if orientation == gtk::Orientation::Horizontal { w.round() as i32 } else { h.round() as i32 };
             (v, v, -1, -1)
         }
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let anim = self.anim.borrow();
             let Some(anim) = anim.as_ref() else { return };
-            let (w, h) = self.size.get();
+            let (cw, ch) = self.size.get();
+            let (vw, vh) = (self.obj().width() as f64, self.obj().height() as f64);
+            let (vw, vh) = if vw < 1.0 || vh < 1.0 { mask_xf::bbox(self.angle.get(), cw as f64, ch as f64) } else { (vw, vh) };
+            let view = to_view(self.angle.get(), cw as f64, ch as f64, vw, vh);
             let (texture, _) = &anim.frames[self.frame.get() % anim.frames.len()];
             // Trilinear (mipmapped) filtering keeps shrunken GIFs smooth.
             let filter = if self.downscale.get() { gsk::ScalingFilter::Trilinear } else { gsk::ScalingFilter::Linear };
-            let rect = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let rect = graphene::Rect::new(0.0, 0.0, cw as f32, ch as f32);
             let xf = self.xf.get();
             let mask = self.mask.borrow();
             let mask_tex = mask.as_ref().map(|m| m.frames[self.mask_frame.get() % m.frames.len()].0.clone());
+            let mask_xf = gsk_of(&Affine::of(&xf, cw as f64, ch as f64));
+
+            snapshot.save();
+            snapshot.transform(Some(&gsk_of(&view)));
             if let Some(tex) = &mask_tex {
                 snapshot.push_mask(gsk::MaskMode::Alpha);
                 snapshot.save();
-                snapshot.transform(Some(&transform(&xf, w, h)));
+                snapshot.transform(Some(&mask_xf));
                 snapshot.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
                 snapshot.restore();
                 snapshot.pop();
@@ -166,7 +189,7 @@ mod imp {
             snapshot.append_scaled_texture(texture, filter, &rect);
             if let Some(tex) = &mask_tex {
                 snapshot.pop();
-                // The mask itself, drawn over the widget as the user likes it.
+                // The mask itself, drawn over the picture as the user likes it.
                 let opacity = self.mask_opacity.get();
                 if opacity > 0.0 {
                     snapshot.push_opacity(opacity);
@@ -176,7 +199,7 @@ mod imp {
                         snapshot.push_color_matrix(&graphene::Matrix::from_float(flat.try_into().unwrap()), &graphene::Vec4::new(o[0], o[1], o[2], o[3]));
                     }
                     snapshot.save();
-                    snapshot.transform(Some(&transform(&xf, w, h)));
+                    snapshot.transform(Some(&mask_xf));
                     snapshot.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
                     snapshot.restore();
                     if colour.is_some() {
@@ -186,8 +209,9 @@ mod imp {
                 }
             }
             if self.edit.get() {
-                self.draw_handles(snapshot, &xf, w, h);
+                self.draw_handles(snapshot, &xf, cw, ch);
             }
+            snapshot.restore();
         }
     }
 
@@ -210,14 +234,16 @@ mod imp {
             let _ = cr.stroke();
             for (handle, (x, y)) in mask_xf::handles(xf, wf, hf) {
                 match handle {
-                    Handle::Skew(_) => cr.arc(x, y, 4.5, 0.0, std::f64::consts::TAU),
+                    Handle::Skew(_) | Handle::Rotate => cr.arc(x, y, 4.5, 0.0, std::f64::consts::TAU),
                     Handle::Corner(_) => cr.rectangle(x - 5.0, y - 5.0, 10.0, 10.0),
                     _ => cr.rectangle(x - 4.0, y - 4.0, 8.0, 8.0),
                 }
                 cr.set_source_rgb(1.0, 1.0, 1.0);
                 let _ = cr.fill_preserve();
                 cr.set_line_width(1.5);
-                if matches!(handle, Handle::Skew(_)) {
+                if matches!(handle, Handle::Rotate) {
+                    cr.set_source_rgb(0.55, 0.75, 0.15);
+                } else if matches!(handle, Handle::Skew(_)) {
                     cr.set_source_rgb(0.9, 0.45, 0.1);
                 } else {
                     cr.set_source_rgb(0.21, 0.52, 0.89);
@@ -271,6 +297,30 @@ impl AnimView {
             imp.xf.set(xf);
         }
         self.queue_draw();
+    }
+
+    /// Rotation of the whole picture (degrees). The widget asks for the box a
+    /// turned picture needs, so nothing is cropped.
+    pub fn set_angle(&self, deg: f64) {
+        if self.imp().angle.replace(deg) == deg {
+            return;
+        }
+        self.queue_resize();
+        self.queue_draw();
+    }
+
+    /// Pointer position in picture space (handles live there, so they turn with the picture).
+    fn to_content(&self, p: (f64, f64)) -> Option<(f64, f64)> {
+        let (cw, ch) = self.imp().size.get();
+        let (vw, vh) = (self.width() as f64, self.height() as f64);
+        to_view(self.imp().angle.get(), cw as f64, ch as f64, vw, vh).invert(p)
+    }
+
+    /// A pointer delta from view space to picture space.
+    fn from_view(&self, d: (f64, f64)) -> (f64, f64) {
+        let (cw, ch) = self.imp().size.get();
+        let (vw, vh) = (self.width() as f64, self.height() as f64);
+        to_view(self.imp().angle.get(), cw as f64, ch as f64, vw, vh).unrotate(d)
     }
 
     pub fn set_hooks(&self, on_xf: XfCb, on_exit: Rc<dyn Fn()>) {

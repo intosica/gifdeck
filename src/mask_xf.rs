@@ -1,7 +1,7 @@
 //! Pure geometry for the mask transform: where the mask lands over a widget,
 //! which on-screen handle is under the pointer, and what dragging it changes.
 //! Local mask space is the widget rectangle `0..w × 0..h`; the transform is
-//! `p' = centre + offset + K·S·(p − centre)` with S = scale, K = skew.
+//! `p' = centre + offset + R·K·S·(p − centre)` with S = scale, K = skew, R = rotation.
 
 use crate::model::MaskXf;
 
@@ -16,6 +16,8 @@ pub enum Handle {
     Edge(usize),
     /// Same numbering as `Edge`. Skews along the edge.
     Skew(usize),
+    /// Circled handle outside the box: spins the mask around its centre.
+    Rotate,
 }
 
 /// `x' = a·x + c·y + e`, `y' = b·x + d·y + f`.
@@ -26,7 +28,7 @@ impl Affine {
     pub fn of(xf: &MaskXf, w: f64, h: f64) -> Affine {
         let (sx, sy) = (xf.size * xf.sx, xf.size * xf.sy);
         let (kx, ky) = (xf.skew_x.to_radians().tan(), xf.skew_y.to_radians().tan());
-        let (a, b, c, d) = (sx, ky * sx, kx * sy, sy);
+        let (a, b, c, d) = self::rotate(xf.rot, sx, ky * sx, kx * sy, sy);
         let (cx, cy) = (w / 2.0, h / 2.0);
         Affine(a, b, c, d, cx + xf.dx * w - (a * cx + c * cy), cy + xf.dy * h - (b * cx + d * cy))
     }
@@ -39,6 +41,15 @@ impl Affine {
         (self.0 * p.0 + self.2 * p.1, self.1 * p.0 + self.3 * p.1)
     }
 
+    /// The linear part only, inverted: turns a screen delta into a local one.
+    pub fn unrotate(&self, d: P) -> P {
+        let det = self.0 * self.3 - self.1 * self.2;
+        if det.abs() < 1e-12 {
+            return d;
+        }
+        ((self.3 * d.0 - self.2 * d.1) / det, (self.0 * d.1 - self.1 * d.0) / det)
+    }
+
     pub fn invert(&self, p: P) -> Option<P> {
         let det = self.0 * self.3 - self.1 * self.2;
         if det.abs() < 1e-9 {
@@ -47,6 +58,24 @@ impl Affine {
         let (x, y) = (p.0 - self.4, p.1 - self.5);
         Some(((self.3 * x - self.2 * y) / det, (self.0 * y - self.1 * x) / det))
     }
+}
+
+/// Rotation of the whole picture, about the centre of a `w × h` box.
+pub fn spin(deg: f64, w: f64, h: f64) -> Affine {
+    let (a, b, c, d) = rotate(deg, 1.0, 0.0, 0.0, 1.0);
+    Affine(a, b, c, d, w / 2.0 - (a * w / 2.0 + c * h / 2.0), h / 2.0 - (b * w / 2.0 + d * h / 2.0))
+}
+
+/// `R(deg) · [[a, c], [b, d]]`, staying in the (a, b, c, d) order.
+fn rotate(deg: f64, a: f64, b: f64, c: f64, d: f64) -> (f64, f64, f64, f64) {
+    let (cos, sin) = (deg.to_radians().cos(), deg.to_radians().sin());
+    (cos * a - sin * b, sin * a + cos * b, cos * c - sin * d, sin * c + cos * d)
+}
+
+/// Size of the box a rotated `w × h` picture needs.
+pub fn bbox(deg: f64, w: f64, h: f64) -> (f64, f64) {
+    let (cos, sin) = (deg.to_radians().cos().abs(), deg.to_radians().sin().abs());
+    ((w * cos + h * sin).round(), (w * sin + h * cos).round())
 }
 
 fn corner(i: usize, w: f64, h: f64) -> P {
@@ -59,6 +88,7 @@ fn edge_mid(i: usize, w: f64, h: f64) -> P {
 
 const OUT: [P; 4] = [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)];
 const SKEW_GAP: f64 = 16.0;
+const ROTATE_GAP: f64 = 30.0;
 const PAD: f64 = 9.0;
 const HIT: f64 = 10.0;
 
@@ -79,6 +109,13 @@ pub fn handles(xf: &MaskXf, w: f64, h: f64) -> Vec<(Handle, P)> {
         let len = n.0.hypot(n.1).max(1e-9);
         out.push((Handle::Skew(i), keep((m.0 + n.0 / len * SKEW_GAP, m.1 + n.1 / len * SKEW_GAP))));
     }
+    // Rotate handle: past the top-left corner along the box diagonal.
+    let (a, b) = (t.apply(corner(0, w, h)), t.apply(corner(2, w, h)));
+    let (mut dx, mut dy) = (a.0 - b.0, a.1 - b.1);
+    let len = dx.hypot(dy).max(1e-9);
+    dx /= len;
+    dy /= len;
+    out.push((Handle::Rotate, keep((a.0 + dx * ROTATE_GAP, a.1 + dy * ROTATE_GAP))));
     out
 }
 
@@ -122,6 +159,11 @@ pub fn drag(handle: Handle, x0: &MaskXf, w: f64, h: f64, p0: P, d: P) -> MaskXf 
             let r = (1.0 + sign * (d.0 * axis.0 + d.1 * axis.1) / unit / len).max(0.02);
             let anchor = edge_mid(i + 2, w, h);
             if horizontal { rescale(x0, x0.size, x0.sx * r, x0.sy, anchor, w, h) } else { rescale(x0, x0.size, x0.sx, x0.sy * r, anchor, w, h) }
+        }
+        Handle::Rotate => {
+            let (cx, cy) = (w / 2.0 + x0.dx * w, h / 2.0 + x0.dy * h);
+            let angle = |p: P| (p.1 - cy).atan2(p.0 - cx).to_degrees();
+            MaskXf { rot: (x0.rot + angle((p0.0 + d.0, p0.1 + d.1)) - angle(p0)).rem_euclid(360.0), ..*x0 }
         }
         Handle::Skew(i) => {
             let (sx, sy) = (x0.size * x0.sx, x0.size * x0.sy);
@@ -193,6 +235,28 @@ mod tests {
         let n = drag(Handle::Edge(1), &MaskXf::default(), w, h, (w, 50.0), (100.0, 30.0));
         assert!((n.sx - 1.5).abs() < 1e-9 && n.sy == 1.0 && n.size == 1.0);
         assert!(close(Affine::of(&n, w, h).apply((0.0, 40.0)), (0.0, 40.0)));
+    }
+
+    #[test]
+    fn mask_rotation_spins_about_the_centre() {
+        let (w, h) = (200.0, 100.0);
+        let xf = MaskXf { rot: 90.0, ..MaskXf::default() };
+        let t = Affine::of(&xf, w, h);
+        assert!(close(t.apply((w / 2.0, h / 2.0)), (w / 2.0, h / 2.0)));
+        // The top edge mid point ends up right of centre after a quarter turn.
+        assert!(close(t.apply((w / 2.0, 0.0)), (w / 2.0 + h / 2.0, h / 2.0)));
+        // Start straight above the centre and drag a quarter turn to the right.
+        let n = drag(Handle::Rotate, &MaskXf::default(), w, h, (w / 2.0, -30.0), (80.0, 80.0));
+        assert!((n.rot - 90.0).abs() < 1e-6, "rot was {}", n.rot);
+    }
+
+    #[test]
+    fn picture_rotation_grows_the_box() {
+        assert_eq!(bbox(0.0, 100.0, 50.0), (100.0, 50.0));
+        assert_eq!(bbox(90.0, 100.0, 50.0), (50.0, 100.0));
+        // A point right of the centre ends up below it after a quarter turn.
+        assert!(close(spin(90.0, 50.0, 100.0).apply((50.0, 50.0)), (25.0, 75.0)));
+        assert!(close(spin(180.0, 50.0, 100.0).apply((50.0, 50.0)), (0.0, 50.0)));
     }
 
     #[test]

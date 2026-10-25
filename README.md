@@ -22,9 +22,10 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 
 ### New in this version
 - **Click-through** instead of locking; per-widget *snap to edges* / *keep inside screen* (layer-shell).
+- **Rotation**: any widget can be turned (`Rotation (°)` in its settings); the window grows to the rotated bounding box, so nothing is cropped. Masks rotate too, from degrees or by their green on-screen handle.
 - **Folder widgets**: rotate sequentially, randomly (min/max seconds) or on a schedule.
 - **Drag & drop** files/folders onto the window to import (onto the Masks tab: PNG masks).
-- **Masks** tab: GIF or PNG alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
+- **Masks** tab: GIF or PNG alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 - **Single-row schedule** with 24h/12h toggle.
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
@@ -83,7 +84,8 @@ gifdeck/
 │   ├── env.rs          X11/Wayland/COSMIC/layer-shell detection; "what can this widget do here?"
 │   ├── model.rs        WidgetConfig, Preset, Rule (+ schedule matching), AppState JSON persistence   [unit-tested]
 │   ├── media.rs        GIF/PNG decoding, memory budget, texture cache                               [unit-tested]
-│   ├── anim_view.rs    custom GtkWidget: draws the current frame scaled, one-shot-timer animation
+│   ├── anim_view.rs    custom GtkWidget: draws the current frame scaled and rotated, one-shot-timer animation, mask handles
+│   ├── mask_xf.rs      mask/picture transform maths: skew, scale, rotation, handle hit-testing   [unit-tested]
 │   ├── widget.rs       one widget: its own window (X11 + EWMH, or Wayland toplevel) or hosted in a layer surface
 │   ├── layer_host.rs   shared layer-shell surface per layer: deterministic stacking, input region, dragging
 │   ├── x11.rs          EWMH hints, raise, move, frame-aware position (x11rb, 2nd connection, same process)
@@ -91,6 +93,7 @@ gifdeck/
 │   ├── ctx.rs          the only place that mutates state: presets, rules, import, scheduler
 │   ├── autostart.rs    Background portal request (async, with Response) / autostart .desktop file
 │   └── ui/             libadwaita window: Widgets, Presets (+ schedule), Settings pages
+├── install.sh          native build + install (system Rust, any distro; ~/.local or --prefix)
 ├── data/               .desktop, AppStream metainfo, icon, style.css
 └── flatpak/            manifest, launcher, build script, cargo-sources.json
 ```
@@ -136,7 +139,7 @@ cargo test
 
 Tested in a sandbox, not on a real desktop:
 
-* `cargo test`: 10 unit tests (schedule incl. overnight wrap, GIF disposal/transparency/timing, PNG alpha, memory budget, persistence).
+* `cargo test`: 20 unit tests (schedule incl. overnight wrap, GIF disposal/transparency/timing, PNG alpha, memory budget, persistence, mask/picture rotation and handle geometry).
 * **X11** (Xvfb + openbox): `_NET_WM_STATE_ABOVE` / `_BELOW` set, skip-taskbar, positions honoured and stable across restarts
   (found and fixed a title-bar-height drift), stacking order follows list order, single process.
 * **Wayland layer-shell** (headless sway): real alpha transparency over a coloured background; Top-layer widgets above and

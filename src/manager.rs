@@ -71,6 +71,7 @@ fn needs_rebuild(a: &WidgetConfig, b: &WidgetConfig) -> bool {
         || a.level != b.level
         || a.click_through != b.click_through
         || a.mask != b.mask
+        || a.angle != b.angle
         || a.rotation != b.rotation
         || a.snap_edges != b.snap_edges
         || a.keep_inside != b.keep_inside

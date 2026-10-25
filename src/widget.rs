@@ -34,6 +34,13 @@ pub struct WidgetWindow {
     view: Option<AnimView>,
 }
 
+/// The box a widget occupies: its scaled picture, grown to fit when rotated.
+pub fn placed_size(anim: &Anim, scale: f64, angle: f64) -> (i32, i32) {
+    let (w, h) = scaled_size(anim, scale);
+    let (w, h) = crate::mask_xf::bbox(angle, w as f64, h as f64);
+    ((w.round() as i32).max(1), (h.round() as i32).max(1))
+}
+
 pub fn scaled_size(anim: &Anim, scale: f64) -> (i32, i32) {
     (
         ((anim.width as f64 * scale).round() as i32).max(1),
@@ -50,8 +57,10 @@ impl WidgetWindow {
 
     /// Show the widget in its own window.
     pub fn build_window(app: &adw::Application, env: &Env, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>, on_closed: ClosedCb) -> WidgetWindow {
-        let (w, h) = scaled_size(anim, cfg.scale);
-        let view = AnimView::new(anim.clone(), w, h, mask);
+        let (w, h) = placed_size(anim, cfg.scale, cfg.angle);
+        let (cw, ch) = scaled_size(anim, cfg.scale);
+        let view = AnimView::new(anim.clone(), cw, ch, mask);
+        view.set_angle(cfg.angle);
         view.set_opacity(cfg.opacity);
         view.play();
 
@@ -116,6 +125,7 @@ impl WidgetWindow {
                 if let Some(v) = &self.view {
                     let (w, h) = scaled_size(anim, self.cfg.scale);
                     v.set_anim(anim.clone(), w, h, mask);
+                    v.set_angle(self.cfg.angle);
                     v.play();
                 }
             }

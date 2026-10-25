@@ -29,6 +29,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-06-11">
+      <description>
+        <p>Rotate widgets and masks, transform masks on screen, animated GIF masks, mask opacity, one-command native install.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-24"/>
   </releases>
 </component>

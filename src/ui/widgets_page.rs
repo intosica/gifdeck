@@ -24,13 +24,14 @@ struct XfRows {
 type XfSpec = (&'static str, f64, f64, f64, fn(&WidgetConfig) -> f64, fn(&mut WidgetConfig, f64));
 
 /// Mask rows in display units (percent / degrees).
-const XF_SPECS: [XfSpec; 9] = [
+const XF_SPECS: [XfSpec; 10] = [
     ("Mask opacity (%) — 0 only clips", 0.0, 100.0, 5.0, |c| c.mask_opacity * 100.0, |c, v| c.mask_opacity = v / 100.0),
     ("Mask size (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.size * 100.0, |c, v| c.mask_xf.size = v / 100.0),
     ("Mask stretch width (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sx * 100.0, |c, v| c.mask_xf.sx = v / 100.0),
     ("Mask stretch height (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sy * 100.0, |c, v| c.mask_xf.sy = v / 100.0),
     ("Mask skew X (°)", -75.0, 75.0, 1.0, |c| c.mask_xf.skew_x, |c, v| c.mask_xf.skew_x = v),
     ("Mask skew Y (°)", -75.0, 75.0, 1.0, |c| c.mask_xf.skew_y, |c, v| c.mask_xf.skew_y = v),
+    ("Mask rotation (°)", -180.0, 180.0, 5.0, |c| c.mask_xf.rot, |c, v| c.mask_xf.rot = v),
     ("Mask hue (°)", -180.0, 180.0, 5.0, |c| c.mask_xf.hue, |c, v| c.mask_xf.hue = v),
     ("Mask contrast (%)", 0.0, 300.0, 5.0, |c| c.mask_xf.contrast * 100.0, |c, v| c.mask_xf.contrast = v / 100.0),
     ("Mask brightness (%)", -100.0, 100.0, 5.0, |c| c.mask_xf.brightness * 100.0, |c, v| c.mask_xf.brightness = v / 100.0),
@@ -287,6 +288,9 @@ impl WidgetsPage {
         let layer = adw::ComboRow::builder().title("Layer").model(&gtk::StringList::new(&labels)).selected(cfg.level.index()).build();
         let note = adw::ActionRow::builder().title("Note").css_classes(["warning"]).build();
         note.set_subtitle_lines(0);
+        let angle = adw::SpinRow::with_range(-180.0, 180.0, 5.0);
+        angle.set_title("Rotation (°)");
+        angle.set_value(cfg.angle.round());
         let scale = adw::SpinRow::with_range(10.0, 400.0, 5.0);
         scale.set_title("Size (%)");
         scale.set_value((cfg.scale * 100.0).round());
@@ -351,6 +355,7 @@ impl WidgetsPage {
             layer.clone().upcast(),
             note.clone().upcast(),
             scale.clone().upcast(),
+            angle.clone().upcast(),
             opacity.clone().upcast(),
             click.clone().upcast(),
             snap.clone().upcast(),
@@ -443,6 +448,7 @@ impl WidgetsPage {
         on_change!(connect_active_notify, decorated, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.decorated = on });
         on_change!(connect_selected_notify, layer, |s, c| { let l = Level::from_index(s.selected()); move |c: &mut WidgetConfig| c.level = l });
         on_change!(connect_value_notify, scale, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.scale = v });
+        on_change!(connect_value_notify, angle, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| c.angle = v });
         on_change!(connect_value_notify, opacity, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.opacity = v });
         on_change!(connect_active_notify, click, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.click_through = on });
         on_change!(connect_active_notify, snap, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.snap_edges = on });

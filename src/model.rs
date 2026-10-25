@@ -224,6 +224,8 @@ pub struct MaskXf {
     pub sy: f64,
     pub skew_x: f64,
     pub skew_y: f64,
+    /// Rotation about the mask centre, in degrees.
+    pub rot: f64,
     pub hue: f64,
     pub contrast: f64,
     pub brightness: f64,
@@ -231,7 +233,7 @@ pub struct MaskXf {
 
 impl Default for MaskXf {
     fn default() -> Self {
-        MaskXf { dx: 0.0, dy: 0.0, size: 1.0, sx: 1.0, sy: 1.0, skew_x: 0.0, skew_y: 0.0, hue: 0.0, contrast: 1.0, brightness: 0.0 }
+        MaskXf { dx: 0.0, dy: 0.0, size: 1.0, sx: 1.0, sy: 1.0, skew_x: 0.0, skew_y: 0.0, rot: 0.0, hue: 0.0, contrast: 1.0, brightness: 0.0 }
     }
 }
 
@@ -261,6 +263,8 @@ pub struct WidgetConfig {
     /// How visibly the mask itself is drawn over the widget; 0 = it only clips.
     pub mask_opacity: f64,
     pub mask_xf: MaskXf,
+    /// Rotation of the whole picture, in degrees.
+    pub angle: f64,
     /// While dragging, stick to the screen edges when close.
     pub snap_edges: bool,
     /// While dragging, never leave the screen.
@@ -286,6 +290,7 @@ impl Default for WidgetConfig {
             mask: None,
             mask_opacity: 0.0,
             mask_xf: MaskXf::default(),
+            angle: 0.0,
             snap_edges: false,
             keep_inside: false,
             app: None,
