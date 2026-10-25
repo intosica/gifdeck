@@ -161,6 +161,19 @@ impl WidgetWindow {
         }
     }
 
+    /// X11 only: apply snap / keep-inside to the window's current spot; returns the final position.
+    pub fn x11_constrain(&self, pos: (i32, i32)) -> (i32, i32) {
+        let Backing::Window(w) = &self.backing else { return pos };
+        if !(self.cfg.snap_edges || self.cfg.keep_inside) {
+            return pos;
+        }
+        let Some(mon) = gtk::gdk::Display::default().and_then(|d| d.monitors().item(0)).and_downcast::<gtk::gdk::Monitor>() else { return pos };
+        let g = mon.geometry();
+        let rel = (pos.0 - g.x(), pos.1 - g.y());
+        let r = crate::layer_host::place(rel, (w.width(), w.height()), (g.width(), g.height()), self.cfg.keep_inside, self.cfg.snap_edges);
+        (r.0 + g.x(), r.1 + g.y())
+    }
+
     pub fn raise_x11(&self) {
         if let Backing::Window(w) = &self.backing {
             if let Some(xid) = x11::xid_of(w) {

@@ -41,7 +41,7 @@ const SNAP: i32 = 16;
 
 /// Where a dragged widget of `size` ends up, given the surface size.
 /// Unconfined widgets may leave the screen; `keep_inside` clamps, `snap_edges` sticks to near edges.
-fn place(pos: (i32, i32), size: (i32, i32), area: (i32, i32), keep_inside: bool, snap_edges: bool) -> (i32, i32) {
+pub fn place(pos: (i32, i32), size: (i32, i32), area: (i32, i32), keep_inside: bool, snap_edges: bool) -> (i32, i32) {
     let axis = |p: i32, len: i32, max: i32| {
         if max <= 0 {
             return p; // surface not sized yet: do not shove the widget anywhere

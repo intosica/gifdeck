@@ -120,7 +120,10 @@ impl Ui {
                 self.presets.rebuild_rules();
             }
             Refresh::Schedule => self.presets.rebuild_rules(),
-            Refresh::Masks => self.masks.rebuild(),
+            Refresh::Masks => {
+                self.masks.rebuild();
+                self.widgets.rebuild();
+            }
             Refresh::Enabled => self.enabled_action.set_state(&self.widgets_enabled().to_variant()),
             Refresh::Blacklist => (self.rebuild_blacklist)(),
             Refresh::Status => self.presets.update_status(),

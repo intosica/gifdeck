@@ -325,7 +325,15 @@ impl Manager {
         }
         let mut moved = Vec::new();
         for (id, w) in self.widgets.borrow_mut().iter_mut() {
-            if let Some((x, y)) = w.x11_position() {
+            if let Some(pos) = w.x11_position() {
+                let (x, y) = w.x11_constrain(pos);
+                if (x, y) != pos {
+                    if let Backing::Window(win) = &w.backing {
+                        if let Some(xid) = crate::x11::xid_of(win) {
+                            crate::x11::move_to(xid, x, y);
+                        }
+                    }
+                }
                 if (x, y) != (w.cfg.x, w.cfg.y) {
                     w.cfg.x = x;
                     w.cfg.y = y;

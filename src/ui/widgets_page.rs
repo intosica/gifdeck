@@ -250,9 +250,6 @@ impl WidgetsPage {
         y.set_value(cfg.y as f64);
         let snap = adw::SwitchRow::builder().title("Snap to screen edges").subtitle("While dragging, stick to an edge when close").active(cfg.snap_edges).build();
         let keep = adw::SwitchRow::builder().title("Keep inside the screen").subtitle("While dragging, never push the widget past the edges").active(cfg.keep_inside).build();
-        let can_drag = matches!(ctx.env.role(cfg), crate::env::Role::Layer(_));
-        snap.set_sensitive(can_drag);
-        keep.set_sensitive(can_drag);
 
         // Alpha mask: pick any saved mask (or none) from the dropdown.
         let masks = ctx.state.borrow().masks.clone();

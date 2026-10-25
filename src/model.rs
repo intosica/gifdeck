@@ -176,9 +176,9 @@ impl Storage {
 
     pub fn label(self) -> &'static str {
         match self {
-            Storage::Source => "Load from the original location",
-            Storage::Home => "Copy into an organized folder in Home",
-            Storage::Documents => "Copy into an organized folder in Documents",
+            Storage::Source => "Original location",
+            Storage::Home => "Copy to Home",
+            Storage::Documents => "Copy to Documents",
         }
     }
 
