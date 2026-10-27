@@ -10,7 +10,11 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 |---|---|
 | One process, many widgets | `Manager` owns every widget `gtk::Window` inside the single GTK application. Nothing is ever spawned. |
 | GIF + PNG | `media.rs`: own GIF decoder loop (correct disposal + transparency), `png` for stills. Files are copied into the app's data folder on import. |
-| Alpha transparency | Straight-alpha `gdk::MemoryTexture`s, windows with a transparent CSS background. |
+| Alpha transparency | Straight-alpha `gdk::MemoryTexture`s, windows with a transparent CSS background. | 
+
+https://github.com/user-attachments/assets/0eeb0b56-9a7b-4158-9d78-cd174a15eab1
+
+ 
 | Light on CPU/GPU | Frames are decoded once (on a worker thread) and uploaded once as textures. Each frame change is one `queue_draw()` driven by a one-shot timer, so a 10 fps GIF wakes the process 10×/s. Identical files share textures. |
 | Decorations on/off per widget | `decorated` flag → normal titled window, or borderless + transparent. |
 | Always on top / desktop layer per widget | X11: EWMH `_NET_WM_STATE_ABOVE` / `_BELOW`. Wayland: layer-shell `Top` / `Bottom` layer. |
