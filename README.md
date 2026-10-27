@@ -44,8 +44,10 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Single-row schedule** with 24h/12h toggle.
 
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
+<img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/37fded65-2690-4fe9-9905-0fbae521e579" />
 
 - **Quick Settings**: `data/gnome-shell-extension/` adds a toggle-all-widgets button (works with Quick Settings Tweaks). Install: copy to `~/.local/share/gnome-shell/extensions/gifdeck@gifdeck.dev/` and enable it.
+<img width="350" height="329" alt="image" src="https://github.com/user-attachments/assets/d8427e32-0323-44ab-97f5-941dce352cc9" />
 
 - App detection is X11-only (no Wayland protocol exists for it); in Flatpak only exported apps are listed.
 
