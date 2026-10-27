@@ -48,7 +48,8 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 <img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/37fded65-2690-4fe9-9905-0fbae521e579" />
 
 - **Quick Settings**: `data/gnome-shell-extension/` adds a toggle-all-widgets button (works with Quick Settings Tweaks). Install: copy to `~/.local/share/gnome-shell/extensions/gifdeck@gifdeck.dev/` and enable it.
-<img width="350" height="329" alt="image" src="https://github.com/user-attachments/assets/d8427e32-0323-44ab-97f5-941dce352cc9" />
+<img width="350" height="329" alt="Screenshot from 2026-10-27 00-54-38" src="https://github.com/user-attachments/assets/87afcb77-12f2-418d-acb8-73166c29b4a0" />
+
 
 - App detection is X11-only (no Wayland protocol exists for it); in Flatpak only exported apps are listed.
 
