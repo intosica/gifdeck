@@ -1,6 +1,7 @@
 # GifDeck
-
-<img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/2dc5a972-f8ba-453b-ae99-d61994716122" />
+<div align="center">
+  <img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/2dc5a972-f8ba-453b-ae99-d61994716122" />
+</div>
 
 
 https://github.com/user-attachments/assets/24941c1e-1b99-4f65-9e76-9a568fcb2e79
