@@ -1,6 +1,7 @@
 # GifDeck
 
 https://github.com/user-attachments/assets/24941c1e-1b99-4f65-9e76-9a568fcb2e79
+
 https://github.com/user-attachments/assets/da1f1cbf-66cd-4286-9132-45a6a6d5d4a9
 
 Animated **GIF / PNG widgets** for your desktop. One small manager window, **one process**,
