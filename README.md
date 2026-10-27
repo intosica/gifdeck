@@ -42,6 +42,7 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 
 - **Single-row schedule** with 24h/12h toggle.
+<img width="644" height="842" alt="image" src="https://github.com/user-attachments/assets/a3218219-7fc1-4bf6-a6b8-59fa7e236f9e" />
 
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
 <img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/37fded65-2690-4fe9-9905-0fbae521e579" />
