@@ -2,11 +2,11 @@
 Type=Application
 Name=GifDeck
 GenericName=Desktop GIF Widgets
-Comment=Animated GIF and PNG widgets for your desktop
+Comment=Animated GIF, PNG and WebP widgets for your desktop
 Exec=gifdeck
 Icon=dev.gifdeck.GifDeck
 Terminal=false
 Categories=Utility;GTK;
-Keywords=gif;png;widget;desktop;companion;animated;overlay;
+Keywords=gif;png;webp;widget;desktop;companion;animated;overlay;
 StartupNotify=true
 StartupWMClass=gifdeck

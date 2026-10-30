@@ -10,6 +10,7 @@ use gtk::{gio, glib};
 use crate::ctx::AppCtx;
 use crate::media;
 use crate::model::{AppMode, Level, RotMode, SchedEntry, WidgetConfig};
+use crate::monitors;
 use super::app_picker;
 
 /// Keeps clicks on the mask controls from leaving mask-edit mode (see `Ui::new`).
@@ -72,7 +73,7 @@ impl WidgetsPage {
 
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
         let hint = gtk::Label::builder()
-            .label("No widgets yet.\nPress Add to pick a GIF or PNG, Folder to use a whole\nfolder as one rotating widget, or drop files here.")
+            .label("No widgets yet.\nPress Add to pick a GIF, PNG or WebP, Folder to use a whole\nfolder as one rotating widget, or drop files here.")
             .justify(gtk::Justification::Center)
             .css_classes(["dim-label"])
             .margin_top(24)
@@ -133,12 +134,13 @@ impl WidgetsPage {
             let ctx = ctx.clone();
             add.connect_clicked(move |btn| {
                 let filter = gtk::FileFilter::new();
-                filter.set_name(Some("GIF and PNG images"));
+                filter.set_name(Some("GIF, PNG and WebP images"));
                 filter.add_mime_type("image/gif");
                 filter.add_mime_type("image/png");
+                filter.add_mime_type("image/webp");
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
-                let dialog = gtk::FileDialog::builder().title("Add GIF or PNG").modal(true).filters(&filters).default_filter(&filter).build();
+                let dialog = gtk::FileDialog::builder().title("Add GIF, PNG or WebP").modal(true).filters(&filters).default_filter(&filter).build();
                 let parent = btn.root().and_downcast::<gtk::Window>();
                 let ctx = ctx.clone();
                 dialog.open_multiple(parent.as_ref(), gio::Cancellable::NONE, move |res| {
@@ -153,7 +155,7 @@ impl WidgetsPage {
         {
             let ctx = ctx.clone();
             folder_btn.connect_clicked(move |btn| {
-                let dialog = gtk::FileDialog::builder().title("Choose a folder of GIFs / PNGs").modal(true).build();
+                let dialog = gtk::FileDialog::builder().title("Choose a folder of GIFs / PNGs / WebPs").modal(true).build();
                 let parent = btn.root().and_downcast::<gtk::Window>();
                 let ctx = ctx.clone();
                 dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |res| {
@@ -193,7 +195,23 @@ impl WidgetsPage {
         for (i, cfg) in widgets.iter().enumerate() {
             self.list.append(&self.build_row(cfg, i, total));
         }
+        self.apply_workspace_filter();
         self.updating.set(false);
+    }
+
+    /// X11 "per workspace" mode: list only the widgets of the workspace being looked at.
+    /// Hidden entirely (not greyed out), so the page stays short.
+    pub fn apply_workspace_filter(&self) {
+        let (on, now, widgets) = {
+            let st = self.ctx.state.borrow();
+            (st.per_workspace && self.ctx.env.backend == crate::env::Backend::X11, crate::x11::current_desktop(), st.active_preset().widgets.clone())
+        };
+        let mut child = self.list.first_child();
+        for cfg in &widgets {
+            let Some(row) = child else { break };
+            child = row.next_sibling();
+            row.set_visible(!on || cfg.workspace.is_none() || cfg.workspace == now);
+        }
     }
 
     /// x/y changed from outside (drag, window manager).
@@ -304,6 +322,37 @@ impl WidgetsPage {
         let y = adw::SpinRow::with_range(-4000.0, 20000.0, 1.0);
         y.set_title("Position Y");
         y.set_value(cfg.y as f64);
+        // Monitor: "Automatic" or one of the connected outputs (a missing one stays selectable, so it is not forgotten).
+        let monitor_list = monitors::list();
+        let mut monitor_names: Vec<String> = monitor_list.iter().map(|m| m.0.clone()).collect();
+        if let Some(m) = cfg.monitor.as_ref().filter(|m| !monitor_names.contains(m)) {
+            monitor_names.push(m.clone());
+        }
+        let monitor_labels: Vec<String> = std::iter::once("Automatic".to_string())
+            .chain(monitor_names.iter().map(|n| if monitor_list.iter().any(|m| &m.0 == n) { n.clone() } else { format!("{n} (not connected)") }))
+            .collect();
+        let monitor_labels: Vec<&str> = monitor_labels.iter().map(String::as_str).collect();
+        let monitor_sel = cfg.monitor.as_ref().and_then(|m| monitor_names.iter().position(|n| n == m)).map(|i| i as u32 + 1).unwrap_or(0);
+        let monitor = adw::ComboRow::builder()
+            .title("Monitor")
+            .subtitle("The screen the widget stays on; position is measured from its top-left corner")
+            .model(&gtk::StringList::new(&monitor_labels))
+            .selected(monitor_sel)
+            .build();
+
+        // Workspace (X11, only when the master switch in Settings is on).
+        let per_workspace = ctx.env.backend == crate::env::Backend::X11 && ctx.state.borrow().per_workspace;
+        let ws_count = crate::x11::desktop_count().unwrap_or(1).max(cfg.workspace.map_or(1, |w| w + 1));
+        let ws_labels: Vec<String> = std::iter::once("All workspaces".to_string()).chain((1..=ws_count).map(|i| format!("Workspace {i}"))).collect();
+        let ws_labels: Vec<&str> = ws_labels.iter().map(String::as_str).collect();
+        let workspace = adw::ComboRow::builder()
+            .title("Workspace")
+            .subtitle("Widgets of other workspaces are hidden from this list while you are not on them")
+            .model(&gtk::StringList::new(&ws_labels))
+            .selected(cfg.workspace.map_or(0, |w| w + 1))
+            .visible(per_workspace)
+            .build();
+
         let snap = adw::SwitchRow::builder().title("Snap to screen edges").subtitle("While dragging, stick to an edge when close").active(cfg.snap_edges).build();
         let keep = adw::SwitchRow::builder().title("Keep inside the screen").subtitle("While dragging, never push the widget past the edges").active(cfg.keep_inside).build();
 
@@ -394,7 +443,7 @@ impl WidgetsPage {
             rot_mode.connect_selected_notify(move |r| sync_visible(RotMode::from_index(r.selected())));
             rows.extend([rot_mode.clone().upcast(), interval.clone().upcast(), rmin.clone().upcast(), rmax.clone().upcast(), sched.exp.clone().upcast()]);
         }
-        rows.extend([x.clone().upcast(), y.clone().upcast()]);
+        rows.extend([monitor.clone().upcast(), workspace.clone().upcast(), x.clone().upcast(), y.clone().upcast()]);
         for w in &rows {
             row.add_row(w);
         }
@@ -513,6 +562,27 @@ impl WidgetsPage {
         on_change!(connect_value_notify, interval, |s, c| { let v = s.value() as u32; move |c: &mut WidgetConfig| c.rotation.interval = v });
         on_change!(connect_value_notify, rmin, |s, c| { let v = s.value() as u32; move |c: &mut WidgetConfig| { c.rotation.min = v; c.rotation.max = c.rotation.max.max(v) } });
         on_change!(connect_value_notify, rmax, |s, c| { let v = s.value() as u32; move |c: &mut WidgetConfig| { c.rotation.max = v; c.rotation.min = c.rotation.min.min(v) } });
+        on_change!(connect_selected_notify, workspace, |s, c| { let w = s.selected().checked_sub(1); move |c: &mut WidgetConfig| c.workspace = w });
+        {
+            let names = monitor_names.clone();
+            let x11 = ctx.env.backend == crate::env::Backend::X11;
+            let this = Rc::downgrade(self);
+            on_change!(connect_selected_notify, monitor, |s, c| {
+                let m = (s.selected() as usize).checked_sub(1).and_then(|i| names.get(i).cloned());
+                let this = this.clone();
+                move |c: &mut WidgetConfig| {
+                    // Back to "Automatic" on X11: keep the widget where it is, now in screen coordinates.
+                    if m.is_none() && x11 {
+                        (c.x, c.y) = monitors::to_global(c.monitor.as_deref(), c.x, c.y);
+                    }
+                    c.monitor = m;
+                    if let Some(this) = this.upgrade() {
+                        // After the edit is stored: the number fields follow.
+                        glib::idle_add_local_once(move || this.update_positions());
+                    }
+                }
+            });
+        }
         on_change!(connect_value_notify, x, |s, c| { let v = s.value() as i32; move |c: &mut WidgetConfig| c.x = v });
         on_change!(connect_value_notify, y, |s, c| { let v = s.value() as i32; move |c: &mut WidgetConfig| c.y = v });
 

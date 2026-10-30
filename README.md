@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/24941c1e-1b99-4f65-9e76-9a568fcb2e79
 
 https://github.com/user-attachments/assets/da1f1cbf-66cd-4286-9132-45a6a6d5d4a9
 
-Animated **GIF / PNG widgets** for your desktop. One small manager window, **one process**,
+Animated **GIF / PNG / WebP widgets** for your desktop. One small manager window, **one process**,
 any number of independent transparent widgets. Runs on **X11/Xorg** and on **Wayland
 compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 
@@ -17,7 +17,7 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 | Requirement | How it is done |
 |---|---|
 | One process, many widgets | `Manager` owns every widget `gtk::Window` inside the single GTK application. Nothing is ever spawned. |
-| GIF + PNG | `media.rs`: own GIF decoder loop (correct disposal + transparency), `png` for stills. Files are copied into the app's data folder on import. |
+| GIF + PNG + WebP | `media.rs`: own GIF decoder loop (correct disposal + transparency), `png` for stills, `image-webp` for animated and still WebP. Files are copied into the app's data folder on import. |
 | Alpha transparency | Straight-alpha `gdk::MemoryTexture`s, windows with a transparent CSS background.<br><br>https://github.com/user-attachments/assets/0eeb0b56-9a7b-4158-9d78-cd174a15eab1 |
 | Light on CPU/GPU | Frames are decoded once (on a worker thread) and uploaded once as textures. Each frame change is one `queue_draw()` driven by a one-shot timer, so a 10 fps GIF wakes the process 10×/s. Identical files share textures. |
 | Decorations on/off per widget | `decorated` flag → normal titled window, or borderless + transparent. |
@@ -35,9 +35,9 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 
 - **Folder widgets**: rotate sequentially, randomly (min/max seconds) or on a schedule.
 
-- **Drag & drop** files/folders onto the window to import (onto the Masks tab: PNG masks).
+- **Drag & drop** files/folders onto the window to import (onto the Masks tab: masks).
 
-- **Masks** tab: GIF or PNG alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
+- **Masks** tab: GIF, PNG or WebP alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
 
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 
@@ -47,7 +47,11 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.
 <img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/37fded65-2690-4fe9-9905-0fbae521e579" />
 
-- **Quick Settings**: `data/gnome-shell-extension/` adds a toggle-all-widgets button (works with Quick Settings Tweaks). Install: copy to `~/.local/share/gnome-shell/extensions/gifdeck@gifdeck.dev/` and enable it.
+- **Quick Settings**: `data/gnome-shell-extension/` adds a toggle-all-widgets tile (works with Quick Settings Tweaks). It always mirrors the daemon's real state (re-syncs when GifDeck starts or restarts) and its **arrow opens the GifDeck window**, like running `gifdeck`. Install: copy to `~/.local/share/gnome-shell/extensions/gifdeck@gifdeck.dev/`, log out/in once (Xorg) and enable it.
+- **Animated WebP** alongside GIF and PNG.
+- **Schedule rules** can be limited with *Only if application is open*; a rule for an open application beats ordinary rules. Rules overlapping another rule for the same application (or same slot with no application) are outlined in red and are not saved until fixed.
+- **Monitors**: each widget remembers its monitor; positions are relative to it.
+- **X11 workspaces**: Settings → *Widgets per workspace*; widgets then get a Workspace row and the list hides widgets of other workspaces.
 <img width="350" height="329" alt="Screenshot from 2026-10-27 00-54-38" src="https://github.com/user-attachments/assets/87afcb77-12f2-418d-acb8-73166c29b4a0" />
 
 

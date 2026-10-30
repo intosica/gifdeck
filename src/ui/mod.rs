@@ -28,6 +28,7 @@ pub struct Ui {
     /// "All widgets on/off" action, also exported over D-Bus (quick settings toggle).
     enabled_action: gio::SimpleAction,
     rebuild_blacklist: Rc<dyn Fn()>,
+    all_pending: Cell<bool>,
 }
 
 impl Ui {
@@ -53,9 +54,15 @@ impl Ui {
         let enabled_action = gio::SimpleAction::new_stateful("widgets-enabled", None, &ctx.state.borrow().widgets_enabled.to_variant());
         {
             let ctx = ctx.clone();
-            enabled_action.connect_activate(move |a, _| {
+            enabled_action.connect_change_state(move |_, v| {
+                if let Some(on) = v.and_then(|v| v.get::<bool>()) {
+                    ctx.set_widgets_enabled(on);
+                }
+            });
+            // Plain activation (the header button) flips it; the shell asks for an explicit state instead.
+            enabled_action.connect_activate(|a, _| {
                 let on = !a.state().and_then(|v| v.get::<bool>()).unwrap_or(true);
-                ctx.set_widgets_enabled(on);
+                a.change_state(&on.to_variant());
             });
         }
         ctx.app.add_action(&enabled_action);
@@ -123,7 +130,7 @@ impl Ui {
         // Closing the manager keeps the widgets (and the process) alive.
         window.set_hide_on_close(true);
 
-        Rc::new(Ui { ctx: ctx.clone(), window, toasts, widgets, presets, masks, enabled_action, rebuild_blacklist })
+        Rc::new(Ui { ctx: ctx.clone(), window, toasts, widgets, presets, masks, enabled_action, rebuild_blacklist, all_pending: Cell::new(false) })
     }
 
     fn widgets_enabled(&self) -> bool {
@@ -152,12 +159,22 @@ impl Ui {
             Refresh::Enabled => self.enabled_action.set_state(&self.widgets_enabled().to_variant()),
             Refresh::Blacklist => (self.rebuild_blacklist)(),
             Refresh::Status => self.presets.update_status(),
+            Refresh::Workspace => self.widgets.apply_workspace_filter(),
+            // Usually requested from inside a signal handler of one of the very widgets this
+            // rebuilds (preset radio / dropdown). Tearing those down mid-emission is unsafe, so
+            // do it from the main loop, once however many switches arrived meanwhile.
             Refresh::All => {
-                self.masks.rebuild();
-                self.presets.rebuild_presets();
-                self.presets.rebuild_rules();
-                self.widgets.update_presets();
-                self.widgets.rebuild();
+                if !self.all_pending.replace(true) {
+                    let this = self.clone();
+                    glib::idle_add_local_once(move || {
+                        this.all_pending.set(false);
+                        this.masks.rebuild();
+                        this.presets.rebuild_presets();
+                        this.presets.rebuild_rules();
+                        this.widgets.update_presets();
+                        this.widgets.rebuild();
+                    });
+                }
             }
         }
     }
@@ -271,8 +288,24 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     startup.add(&autostart_row);
     page.add(&startup);
 
+    // ---- workspaces (X11 window managers only)
+    if ctx.env.backend == crate::env::Backend::X11 {
+        let group = adw::PreferencesGroup::builder().title("Workspaces").build();
+        let per_ws = adw::SwitchRow::builder()
+            .title("Widgets per workspace")
+            .subtitle("Off: widgets show on every workspace. On: each widget gets its own workspace setting, and the Widgets tab lists only the current workspace's widgets.")
+            .active(ctx.state.borrow().per_workspace)
+            .build();
+        {
+            let ctx = ctx.clone();
+            per_ws.connect_active_notify(move |s| ctx.set_per_workspace(s.is_active()));
+        }
+        group.add(&per_ws);
+        page.add(&group);
+    }
+
     // ---- files
-    let files = adw::PreferencesGroup::builder().title("Files").description("Applies to GIFs, PNGs, widget folders and masks you add.").build();
+    let files = adw::PreferencesGroup::builder().title("Files").description("Applies to GIFs, PNGs, WebPs, widget folders and masks you add.").build();
     let storage = adw::ComboRow::builder()
         .title("When adding files")
         .model(&gtk::StringList::new(&Storage::ALL.map(|s| s.label())))
@@ -285,7 +318,7 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     files.add(&storage);
     let where_to = adw::ActionRow::builder()
         .title("Organized folders")
-        .subtitle("GifDeck/GIFs, PNGs, Widgets and Masks inside the chosen location")
+        .subtitle("GifDeck/GIFs, PNGs, WebPs, Widgets and Masks inside the chosen location")
         .build();
     files.add(&where_to);
     page.add(&files);
@@ -354,6 +387,44 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     }
     page.add(&session);
     (page, rebuild)
+}
+
+const RENAME_ICON: &str = include_str!("../../data/icons/hicolor/scalable/actions/gifdeck-rename-symbolic.svg");
+pub const RENAME_ICON_NAME: &str = "gifdeck-rename-symbolic";
+
+/// Our own copy of the "rename" pencil: libadwaita's entry rows ask the icon theme for
+/// `document-edit-symbolic`, which several themes (and the Flatpak runtime) do not ship.
+/// Written to the cache folder and added to the icon search path, so it works without installing.
+pub fn install_icons() {
+    let base = glib::user_cache_dir().join("gifdeck").join("icons");
+    let dir = base.join("hicolor/scalable/actions");
+    let file = dir.join(format!("{RENAME_ICON_NAME}.svg"));
+    if std::fs::create_dir_all(&dir).is_err() || (std::fs::read_to_string(&file).ok().as_deref() != Some(RENAME_ICON) && std::fs::write(&file, RENAME_ICON).is_err()) {
+        return;
+    }
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::IconTheme::for_display(&display).add_search_path(&base);
+    }
+}
+
+/// Give an entry row our pencil: it is the `edit-icon` image inside libadwaita's row template.
+pub(super) fn set_rename_icon(row: &adw::EntryRow) {
+    fn find(w: &gtk::Widget) -> Option<gtk::Image> {
+        if let Some(img) = w.downcast_ref::<gtk::Image>().filter(|i| i.has_css_class("edit-icon")) {
+            return Some(img.clone());
+        }
+        let mut c = w.first_child();
+        while let Some(child) = c {
+            if let Some(i) = find(&child) {
+                return Some(i);
+            }
+            c = child.next_sibling();
+        }
+        None
+    }
+    if let Some(img) = find(row.upcast_ref()) {
+        img.set_icon_name(Some(RENAME_ICON_NAME));
+    }
 }
 
 /// Application-wide CSS: widget windows are fully transparent.

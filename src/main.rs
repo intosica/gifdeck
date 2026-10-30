@@ -1,4 +1,4 @@
-//! GifDeck: animated GIF / PNG desktop widgets, all managed by this one process.
+//! GifDeck: animated GIF / PNG / WebP desktop widgets, all managed by this one process.
 
 mod anim_view;
 mod autostart;
@@ -9,6 +9,7 @@ mod mask_xf;
 mod manager;
 mod media;
 mod model;
+mod monitors;
 mod ui;
 mod widget;
 mod x11;
@@ -103,6 +104,7 @@ fn main() -> glib::ExitCode {
         move |app| {
             adw::init().ok();
             ui::load_css();
+            ui::install_icons();
             let display = gtk::gdk::Display::default().expect("no display");
             let env = env::Env::detect(&display);
             eprintln!(

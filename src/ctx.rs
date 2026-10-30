@@ -40,6 +40,8 @@ pub enum Refresh {
     Blacklist,
     /// Only the "right now" status needs recomputing.
     Status,
+    /// X11: the current workspace changed; show only its widgets.
+    Workspace,
     All,
 }
 
@@ -55,6 +57,10 @@ pub struct AppCtx {
     /// A preset is only auto-applied when this *changes*, so a manual
     /// choice sticks until the schedule moves on to something else.
     last_scheduled: RefCell<Option<Option<String>>>,
+    /// Preset that was active before an "only if application is open" rule took over; comes back when the app closes.
+    app_return: RefCell<Option<String>>,
+    /// X11: the workspace the user was on at the last look.
+    seen_workspace: std::cell::Cell<Option<u32>>,
     /// Other applications' windows as of the last poll (X11).
     wins: RefCell<Vec<Win>>,
     /// Widget whose mask is being transformed on screen.
@@ -132,6 +138,8 @@ impl AppCtx {
                 on_refresh: RefCell::new(None),
                 on_toast: RefCell::new(None),
                 last_scheduled: RefCell::new(None),
+                app_return: RefCell::new(None),
+                seen_workspace: std::cell::Cell::new(None),
                 wins: RefCell::new(Vec::new()),
             }
         })
@@ -175,19 +183,27 @@ impl AppCtx {
 
     /// Reconcile windows with the state, the master switch and the application rules.
     fn apply(&self) {
+        self.manager.set_per_workspace(self.state.borrow().per_workspace);
         let widgets = self.state.borrow().effective_widgets(&self.wins.borrow());
         self.manager.sync(&widgets);
     }
 
     /// Look at the other applications' windows (every second); re-apply only when something changed.
-    pub fn poll_apps(&self) {
+    pub fn poll_apps(self: &Rc<Self>) {
         if self.env.backend != crate::env::Backend::X11 {
             return;
+        }
+        if self.state.borrow().per_workspace {
+            let now = crate::x11::current_desktop();
+            if self.seen_workspace.replace(now) != now {
+                self.refresh(Refresh::Workspace);
+            }
         }
         let wins = crate::x11::windows();
         if wins != *self.wins.borrow() {
             *self.wins.borrow_mut() = wins;
             self.apply();
+            self.tick_schedule(); // "only if application is open" rules follow the windows
         }
     }
 
@@ -221,6 +237,19 @@ impl AppCtx {
         self.state.borrow_mut().time_24h = on;
         self.save();
         self.refresh(Refresh::Schedule);
+    }
+
+    /// X11 master switch: widgets belong to a workspace (or to all).
+    pub fn set_per_workspace(self: &Rc<Self>, on: bool) {
+        self.state.borrow_mut().per_workspace = on;
+        self.seen_workspace.set(crate::x11::current_desktop());
+        self.flush();
+        self.refresh(Refresh::Widgets);
+    }
+
+    /// The workspace a new widget should belong to (only when the master switch is on).
+    pub fn new_widget_workspace(&self) -> Option<u32> {
+        if self.state.borrow().per_workspace { crate::x11::current_desktop() } else { None }
     }
 
     pub fn set_storage(&self, storage: Storage) {
@@ -271,7 +300,7 @@ impl AppCtx {
         self.import(files, false);
     }
 
-    /// Save the picked GIFs / PNGs as alpha masks.
+    /// Save the picked GIFs / PNGs / WebPs as alpha masks.
     pub fn import_masks(self: &Rc<Self>, files: Vec<gio::File>) {
         self.import(files, true);
     }
@@ -280,6 +309,7 @@ impl AppCtx {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let storage = this.state.borrow().storage;
+            let workspace = this.new_widget_workspace();
             let mut added = 0;
             for file in files {
                 let Some(src) = file.path() else {
@@ -291,13 +321,13 @@ impl AppCtx {
                 let ok = if masks { !folder && media::is_supported(&src) } else if folder { !media::list_folder(&src).is_empty() } else { media::is_supported(&src) };
                 if !ok {
                     this.toast(&match (masks, folder) {
-                        (true, _) => format!("{name} is not a GIF or PNG image."),
-                        (false, true) => format!("{name} has no GIF or PNG files."),
-                        (false, false) => format!("{name} is not a GIF or PNG image."),
+                        (true, _) => format!("{name} is not a GIF, PNG or WebP image."),
+                        (false, true) => format!("{name} has no GIF, PNG or WebP files."),
+                        (false, false) => format!("{name} is not a GIF, PNG or WebP image."),
                     });
                     continue;
                 }
-                let kind = if masks { "Masks" } else if folder { "Widgets" } else if media::is_png(&src) { "PNGs" } else { "GIFs" };
+                let kind = if masks { "Masks" } else if folder { "Widgets" } else { media::kind_dir(&src) };
                 let s = src.clone();
                 let stored = gio::spawn_blocking(move || store(&s, kind, storage)).await;
                 let Ok(Ok(dest)) = stored else {
@@ -312,7 +342,9 @@ impl AppCtx {
                     let preset = st.active_preset_mut();
                     let slot = preset.widgets.len();
                     // New widgets start in front of the others.
-                    preset.widgets.insert(0, WidgetConfig::new(dest, slot));
+                    let mut cfg = WidgetConfig::new(dest, slot);
+                    cfg.workspace = workspace;
+                    preset.widgets.insert(0, cfg);
                 }
                 added += 1;
             }
@@ -390,8 +422,9 @@ impl AppCtx {
         }
         {
             let mut st = self.state.borrow_mut();
-            for (id, x, y) in moved {
+            for (id, monitor, x, y) in moved {
                 if let Some(w) = st.active_preset_mut().widgets.iter_mut().find(|w| w.id == id) {
+                    w.monitor = monitor;
                     w.x = x;
                     w.y = y;
                 }
@@ -523,6 +556,7 @@ impl AppCtx {
 
     fn rules_changed(self: &Rc<Self>) {
         self.save();
+        self.refresh(Refresh::Status); // conflict markers follow every edit
         *self.last_scheduled.borrow_mut() = None; // re-evaluate against the new rules
         self.tick_schedule();
     }
@@ -531,7 +565,7 @@ impl AppCtx {
     pub fn scheduled_now(&self) -> Option<String> {
         let (day, minute) = model::now_slot();
         let st = self.state.borrow();
-        let rule = model::evaluate(&st.rules, day, minute)?;
+        let rule = model::evaluate(&st.rules, &self.wins.borrow(), day, minute)?;
         st.preset(&rule.preset).map(|p| p.name.clone())
     }
 
@@ -547,13 +581,29 @@ impl AppCtx {
                 return;
             }
             let (day, minute) = model::now_slot();
-            model::evaluate(&st.rules, day, minute).map(|r| r.preset.clone())
+            model::evaluate(&st.rules, &self.wins.borrow(), day, minute).map(|r| (r.preset.clone(), r.only_if_open))
         };
-        let changed = self.last_scheduled.borrow().as_ref() != Some(&target);
+        if matches!(target, Some((_, false))) {
+            *self.app_return.borrow_mut() = None; // a plain schedule rule is in charge again
+        }
+        let target_id = target.as_ref().map(|t| t.0.clone());
+        let changed = self.last_scheduled.borrow().as_ref() != Some(&target_id);
         if changed {
-            *self.last_scheduled.borrow_mut() = Some(target.clone());
-            if let Some(id) = target {
-                self.activate_preset(&id);
+            *self.last_scheduled.borrow_mut() = Some(target_id.clone());
+            match target {
+                Some((id, gated)) => {
+                    if gated && self.app_return.borrow().is_none() {
+                        *self.app_return.borrow_mut() = Some(self.state.borrow().active.clone());
+                    }
+                    self.activate_preset(&id);
+                }
+                None => {
+                    // The application closed: go back to what was showing before it opened.
+                    let back = self.app_return.borrow_mut().take();
+                    if let Some(id) = back {
+                        self.activate_preset(&id);
+                    }
+                }
             }
             self.refresh(Refresh::Status);
         }

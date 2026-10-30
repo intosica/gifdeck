@@ -4,7 +4,7 @@
 //! exists with the list of widgets the active preset wants, so applying a
 //! preset, editing a setting or reordering all go through the same code path.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -17,7 +17,8 @@ use crate::env::{Backend, Env, Role};
 use crate::layer_host::LayerHost;
 use crate::media;
 use crate::model::{self, Level, MaskXf, RotMode, Rotation, WidgetConfig};
-use crate::widget::{Backing, ClosedCb, MovedCb, WidgetWindow};
+use crate::monitors;
+use crate::widget::{Backing, ClosedCb, MovedCb, WidgetWindow, Workspace};
 
 /// Which file of a folder widget is showing, and when it changes.
 struct Rot {
@@ -44,8 +45,10 @@ pub struct Manager {
     app: adw::Application,
     env: Env,
     widgets: RefCell<HashMap<String, WidgetWindow>>,
-    /// Shared layer-shell surfaces, one per layer (Wayland only), created on demand.
-    hosts: RefCell<HashMap<Level, Rc<LayerHost>>>,
+    /// Shared layer-shell surfaces, one per layer and monitor (Wayland only), created on demand.
+    hosts: RefCell<HashMap<(Level, Option<String>), Rc<LayerHost>>>,
+    /// X11: widgets belong to a workspace instead of showing on all of them.
+    per_workspace: Cell<bool>,
     /// What the active preset wants, front-most first.
     desired: RefCell<Vec<WidgetConfig>>,
     /// Widgets whose image is still being decoded.
@@ -84,6 +87,7 @@ impl Manager {
             env,
             widgets: RefCell::new(HashMap::new()),
             hosts: RefCell::new(HashMap::new()),
+            per_workspace: Cell::new(false),
             desired: RefCell::new(Vec::new()),
             pending: RefCell::new(HashSet::new()),
             rot: RefCell::new(HashMap::new()),
@@ -132,22 +136,39 @@ impl Manager {
 
     fn close_widget(&self, id: &str) {
         let Some(w) = self.widgets.borrow_mut().remove(id) else { return };
+        // A host that became empty stays alive (its input region is empty, so it is click-through):
+        // destroying and re-creating layer-shell surfaces on every preset switch is what made
+        // rapid switching unstable. `hosts` is bounded by the number of levels.
         w.close();
-        if let Backing::Hosted(host) = &w.backing {
-            if host.is_empty() {
-                host.close();
-                self.hosts.borrow_mut().retain(|_, h| !Rc::ptr_eq(h, host));
-            }
-        }
     }
 
-    fn host_for(&self, level: Level, layer: Layer) -> Rc<LayerHost> {
-        if let Some(h) = self.hosts.borrow().get(&level) {
+    fn host_for(&self, level: Level, layer: Layer, monitor: Option<&str>) -> Rc<LayerHost> {
+        let key = (level, monitor.map(str::to_string));
+        if let Some(h) = self.hosts.borrow().get(&key) {
             return h.clone();
         }
         let host = LayerHost::new(&self.app, layer, self.on_moved.clone());
-        self.hosts.borrow_mut().insert(level, host.clone());
+        if let Some(m) = monitor.and_then(monitors::find) {
+            host.set_monitor(&m);
+        }
+        self.hosts.borrow_mut().insert(key, host.clone());
         host
+    }
+
+    /// Where an X11 window belongs with respect to workspaces.
+    fn workspace(&self, cfg: &WidgetConfig) -> Workspace {
+        if self.per_workspace.get() {
+            match cfg.workspace {
+                Some(d) => (false, Some(d.min(crate::x11::desktop_count().unwrap_or(1).saturating_sub(1)))),
+                None => (true, None),
+            }
+        } else {
+            (cfg.level != Level::Normal, None)
+        }
+    }
+
+    pub fn set_per_workspace(&self, on: bool) {
+        self.per_workspace.set(on);
     }
 
     /// Make the widgets match `widgets` (front-most first).
@@ -167,14 +188,14 @@ impl Manager {
         for cfg in widgets.iter().filter(|w| w.visible) {
             let existing = self.widgets.borrow().get(&cfg.id).map(|w| w.cfg.clone());
             match existing {
-                Some(old) if needs_rebuild(&old, cfg) => {
+                Some(old) if needs_rebuild(&old, cfg) || (self.env.layer_shell && old.monitor != cfg.monitor) => {
                     self.close_widget(&cfg.id);
                     self.spawn_build(cfg.id.clone());
                     created = true;
                 }
                 Some(_) => {
                     if let Some(w) = self.widgets.borrow_mut().get_mut(&cfg.id) {
-                        w.apply_live(&self.env, cfg);
+                        w.apply_live(&self.env, cfg, self.workspace(cfg));
                     }
                 }
                 None => {
@@ -221,12 +242,12 @@ impl Manager {
         };
         let Some(path) = self.current_file(&first) else {
             self.pending.borrow_mut().remove(&id);
-            (self.on_error)(&first.title(), "the folder has no GIF or PNG files");
+            (self.on_error)(&first.title(), "the folder has no supported image files");
             return;
         };
         let this = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let result = media::load(path).await;
+            let result = media::load(path.clone()).await;
             let mask = match &first.mask {
                 Some(m) => media::load(m.clone()).await.ok(),
                 None => None,
@@ -235,6 +256,14 @@ impl Manager {
             this.pending.borrow_mut().remove(&id);
             let cfg = this.desired.borrow().iter().find(|w| w.id == id && w.visible).cloned();
             let Some(cfg) = cfg else { return };
+            // The configuration moved on while we were decoding (another preset, a new file or mask):
+            // what we decoded is stale, start over with the latest.
+            if cfg.mask != first.mask || this.current_file(&cfg).as_ref() != Some(&path) {
+                if !this.widgets.borrow().contains_key(&id) {
+                    this.spawn_build(id);
+                }
+                return;
+            }
             match result {
                 Ok(anim) => {
                     if this.widgets.borrow().contains_key(&id) {
@@ -242,10 +271,10 @@ impl Manager {
                     }
                     let widget = match this.env.role(&cfg) {
                         Role::Layer(layer) => {
-                            let host = this.host_for(cfg.level, layer);
+                            let host = this.host_for(cfg.level, layer, cfg.monitor.as_deref());
                             WidgetWindow::build_hosted(&host, &cfg, &anim, mask)
                         }
-                        Role::Toplevel => WidgetWindow::build_window(&this.app, &this.env, &cfg, &anim, mask, this.on_closed.clone()),
+                        Role::Toplevel => WidgetWindow::build_window(&this.app, &this.env, &cfg, &anim, mask, this.workspace(&cfg), this.on_closed.clone()),
                     };
                     this.widgets.borrow_mut().insert(id.clone(), widget);
                     this.wire(&id);
@@ -327,8 +356,8 @@ impl Manager {
         let changed_prio = changed.map(priority);
 
         // Hosts: order is deterministic, so just apply it.
-        for (level, host) in self.hosts.borrow().iter() {
-            let mut ids: Vec<&String> = widgets.iter().filter(|(_, w)| w.cfg.level == *level && w.host().is_some()).map(|(id, _)| id).collect();
+        for host in self.hosts.borrow().values() {
+            let mut ids: Vec<&String> = widgets.iter().filter(|(_, w)| w.host().is_some_and(|h| Rc::ptr_eq(h, host))).map(|(id, _)| id).collect();
             ids.sort_by_key(|id| std::cmp::Reverse(priority(id)));
             host.reorder(&ids.into_iter().cloned().collect::<Vec<_>>());
         }
@@ -350,27 +379,31 @@ impl Manager {
         }
     }
 
-    /// X11: widgets the user moved with the window manager. Returns (id, x, y) for changed ones.
-    pub fn poll_positions(&self) -> Vec<(String, i32, i32)> {
+    /// X11: widgets the user moved with the window manager. Returns (id, monitor, x, y) for
+    /// changed ones, with x/y relative to the monitor the widget is on.
+    pub fn poll_positions(&self) -> Vec<(String, Option<String>, i32, i32)> {
         if self.env.backend != Backend::X11 {
             return Vec::new();
         }
         let mut moved = Vec::new();
         for (id, w) in self.widgets.borrow_mut().iter_mut() {
-            if let Some(pos) = w.x11_position() {
-                let (x, y) = w.x11_constrain(pos);
-                if (x, y) != pos {
-                    if let Backing::Window(win) = &w.backing {
-                        if let Some(xid) = crate::x11::xid_of(win) {
-                            crate::x11::move_to(xid, x, y);
-                        }
+            let Some(pos) = w.x11_position() else { continue };
+            let at = monitors::to_global(w.cfg.monitor.as_deref(), w.cfg.x, w.cfg.y);
+            let global = w.x11_constrain(pos);
+            if global != pos {
+                if let Backing::Window(win) = &w.backing {
+                    if let Some(xid) = crate::x11::xid_of(win) {
+                        crate::x11::move_to(xid, global.0, global.1);
                     }
                 }
-                if (x, y) != (w.cfg.x, w.cfg.y) {
-                    w.cfg.x = x;
-                    w.cfg.y = y;
-                    moved.push((id.clone(), x, y));
-                }
+            }
+            // Unchanged since we put it there: keep the stored monitor (it may just be unplugged).
+            if global != at {
+                let (mon, x, y) = monitors::from_global(global.0, global.1);
+                w.cfg.monitor = mon.clone();
+                w.cfg.x = x;
+                w.cfg.y = y;
+                moved.push((id.clone(), mon, x, y));
             }
         }
         moved

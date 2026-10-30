@@ -1,4 +1,4 @@
-//! Decoding GIF / PNG files into frames, and turning frames into GPU textures.
+//! Decoding GIF / PNG / WebP files into frames, and turning frames into GPU textures.
 //!
 //! Decoding runs on a worker thread (`gio::spawn_blocking`); only the cheap
 //! texture creation happens on the main thread. Textures are created once and
@@ -40,11 +40,44 @@ fn gif_delay_ms(centis: u16) -> u32 {
     }
 }
 
+/// WebP delays of 0-10 ms mean "as fast as possible"; browsers play those at 100 ms, and so do we.
+fn webp_delay_ms(ms: u32) -> u32 {
+    if ms <= 10 {
+        100
+    } else {
+        ms
+    }
+}
+
+/// What kind of picture a file is, judged by its signature (not by its extension).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Gif,
+    Png,
+    WebP,
+}
+
+fn kind_of(magic: &[u8; 12]) -> Option<Kind> {
+    if magic.starts_with(b"GIF8") {
+        Some(Kind::Gif)
+    } else if magic.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some(Kind::Png)
+    } else if magic.starts_with(b"RIFF") && &magic[8..12] == b"WEBP" {
+        Some(Kind::WebP)
+    } else {
+        None
+    }
+}
+
+fn sniff(path: &Path) -> std::io::Result<Option<Kind>> {
+    let mut magic = [0u8; 12];
+    File::open(path)?.read_exact(&mut magic)?;
+    Ok(kind_of(&magic))
+}
+
 /// Cheap check by file signature (not by extension).
 pub fn is_supported(path: &Path) -> bool {
-    let mut magic = [0u8; 8];
-    File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok()
-        && (magic.starts_with(b"GIF8") || magic.starts_with(&[0x89, b'P', b'N', b'G']))
+    matches!(sniff(path), Ok(Some(_)))
 }
 
 /// Natural order: "img2" < "img10".
@@ -66,7 +99,7 @@ fn natural_key(name: &str) -> Vec<(u64, String)> {
     out
 }
 
-/// GIF / PNG files directly inside `dir`, in natural name order.
+/// GIF / PNG / WebP files directly inside `dir`, in natural name order.
 pub fn list_folder(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_supported(p)).collect())
@@ -75,26 +108,57 @@ pub fn list_folder(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-pub fn is_png(path: &Path) -> bool {
-    let mut magic = [0u8; 4];
-    File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && magic == [0x89, b'P', b'N', b'G']
+/// Name of the storage folder an imported file goes into.
+pub fn kind_dir(path: &Path) -> &'static str {
+    match sniff(path) {
+        Ok(Some(Kind::Png)) => "PNGs",
+        Ok(Some(Kind::WebP)) => "WebPs",
+        _ => "GIFs",
+    }
 }
 
 pub fn decode(path: &Path, budget: usize) -> Result<Decoded, String> {
-    let mut magic = [0u8; 8];
-    File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .map_err(|e| format!("cannot read file: {e}"))?;
-
-    let mut decoded = if magic.starts_with(b"GIF8") {
-        decode_gif(path)?
-    } else if magic.starts_with(&[0x89, b'P', b'N', b'G']) {
-        decode_png(path)?
-    } else {
-        return Err("unsupported file type (expected GIF or PNG)".into());
+    let kind = sniff(path).map_err(|e| format!("cannot read file: {e}"))?;
+    let mut decoded = match kind {
+        Some(Kind::Gif) => decode_gif(path)?,
+        Some(Kind::Png) => decode_png(path)?,
+        Some(Kind::WebP) => decode_webp(path, budget)?,
+        None => return Err("unsupported file type (expected GIF, PNG or WebP)".into()),
     };
     fit_budget(&mut decoded, budget);
     Ok(decoded)
+}
+
+/// Still and animated WebP. The decoder composes every frame onto the full canvas (blend and
+/// dispose modes included), so each frame can be shown on its own, as with GIF.
+fn decode_webp(path: &Path, budget: usize) -> Result<Decoded, String> {
+    use image::AnimationDecoder;
+    let err = |e: image::ImageError| format!("WebP decode failed: {e}");
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let decoder = image::codecs::webp::WebPDecoder::new(BufReader::new(file)).map_err(err)?;
+    if !decoder.has_animation() {
+        let img = image::DynamicImage::from_decoder(decoder).map_err(err)?.into_rgba8();
+        let (width, height) = img.dimensions();
+        return Ok(Decoded { width, height, frames: vec![RawFrame { rgba: img.into_raw(), delay_ms: 0 }] });
+    }
+    let mut frames = Vec::new();
+    let (mut width, mut height) = (0, 0);
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(err)?;
+        let (num, den) = frame.delay().numer_denom_ms();
+        let delay_ms = webp_delay_ms((num as f64 / den.max(1) as f64).round() as u32);
+        let img = frame.into_buffer();
+        (width, height) = img.dimensions();
+        // Stop before memory runs away; `fit_budget` shrinks what is left to the budget afterwards.
+        if (frames.len() + 1) * width as usize * height as usize * 4 > budget.saturating_mul(2) {
+            return Err("WebP animation is too large".into());
+        }
+        frames.push(RawFrame { rgba: img.into_raw(), delay_ms });
+    }
+    if frames.is_empty() {
+        return Err("WebP contains no frames".into());
+    }
+    Ok(Decoded { width, height, frames })
 }
 
 fn decode_png(path: &Path) -> Result<Decoded, String> {
@@ -312,6 +376,72 @@ mod tests {
 
         // delays: 5cs -> 50ms, 0cs -> browser-compatible 100ms, 20cs -> 200ms
         assert_eq!(d.frames.iter().map(|f| f.delay_ms).collect::<Vec<_>>(), vec![50, 100, 200, 70]);
+    }
+
+    fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut c = tag.to_vec();
+        c.extend((payload.len() as u32).to_le_bytes());
+        c.extend(payload);
+        if payload.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// A lossless WebP of one colour, as the RIFF chunks after the "WEBP" tag.
+    fn webp_chunks(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let pixels: Vec<u8> = rgba.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out).encode(&pixels, w, h, image::ExtendedColorType::Rgba8).unwrap();
+        out[12..].to_vec()
+    }
+
+    fn riff(chunks: Vec<u8>) -> Vec<u8> {
+        let mut f = b"RIFF".to_vec();
+        f.extend((chunks.len() as u32 + 4).to_le_bytes());
+        f.extend(b"WEBP");
+        f.extend(chunks);
+        f
+    }
+
+    /// Animated 2x2 WebP: red 50 ms, green 5 ms, blue 200 ms.
+    fn write_test_webp(path: &Path) {
+        let mut body = chunk(b"VP8X", &[0x12, 0, 0, 0, 1, 0, 0, 1, 0, 0]); // animation + alpha, canvas 2x2
+        body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+        for (color, ms) in [([255, 0, 0, 255], 50u32), ([0, 255, 0, 255], 5), ([0, 0, 255, 255], 200)] {
+            let mut anmf = vec![0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0]; // x, y, width-1, height-1
+            anmf.extend(&ms.to_le_bytes()[..3]);
+            anmf.push(0b10); // blend off, keep
+            anmf.extend(webp_chunks(2, 2, color));
+            body.extend(chunk(b"ANMF", &anmf));
+        }
+        std::fs::write(path, riff(body)).unwrap();
+    }
+
+    #[test]
+    fn animated_webp_frames_and_timing() {
+        let path = tmp("t.webp");
+        write_test_webp(&path);
+        assert!(is_supported(&path) && kind_dir(&path) == "WebPs");
+        let d = decode(&path, BUDGET_BYTES).unwrap();
+        assert_eq!((d.width, d.height, d.frames.len()), (2, 2, 3));
+        assert_eq!(px(&d, 0, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(px(&d, 1, 0, 0), [0, 255, 0, 255]);
+        assert_eq!(px(&d, 2, 1, 0), [0, 0, 255, 255]);
+        // 5 ms is "as fast as possible" -> 100 ms, like browsers
+        assert_eq!(d.frames.iter().map(|f| f.delay_ms).collect::<Vec<_>>(), vec![50, 100, 200]);
+    }
+
+    #[test]
+    fn still_webp_is_one_frame_and_budget_applies() {
+        let path = tmp("still.webp");
+        std::fs::write(&path, riff(webp_chunks(8, 8, [1, 2, 3, 255]))).unwrap();
+        let d = decode(&path, BUDGET_BYTES).unwrap();
+        assert_eq!((d.width, d.height, d.frames.len()), (8, 8, 1));
+        assert_eq!(px(&d, 0, 7, 7), [1, 2, 3, 255]);
+        // 8*8*4 = 256 bytes; a 64 byte budget shrinks it to 4x4
+        let d = decode(&path, 64).unwrap();
+        assert_eq!((d.width, d.height), (4, 4));
     }
 
     #[test]

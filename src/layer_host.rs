@@ -103,10 +103,6 @@ impl LayerHost {
         host
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.children.borrow().is_empty()
-    }
-
     /// Add (or replace) a widget. New widgets go to the front until `reorder` is called.
     pub fn upsert(&self, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) {
         self.remove(&cfg.id);
@@ -178,11 +174,11 @@ impl LayerHost {
         }
     }
 
-    pub fn close(&self) {
-        self.window.destroy();
+    /// Only the widgets themselves take mouse input; the rest of the surface is click-through.
+    pub fn set_monitor(&self, monitor: &gdk::Monitor) {
+        self.window.set_monitor(Some(monitor));
     }
 
-    /// Only the widgets themselves take mouse input; the rest of the surface is click-through.
     fn update_input_region(&self) {
         let Some(surface) = self.window.surface() else { return };
         let region = cairo::Region::create();

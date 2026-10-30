@@ -5,3 +5,10 @@ window.gifdeck-widget.background {
   background-color: transparent;
   box-shadow: none;
 }
+
+/* A schedule rule that cannot be saved (conflict / missing application). */
+.gifdeck-invalid {
+  outline: 2px solid @error_color;
+  outline-offset: -2px;
+  border-radius: 6px;
+}

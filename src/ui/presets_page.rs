@@ -1,13 +1,15 @@
 //! "Presets" page: manage presets, and assign them to weekdays / times of day.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
 
 use crate::ctx::AppCtx;
-use crate::model::{Rule, DAY_NAMES};
+use crate::model::{self, AppRef, Problem, Rule, DAY_NAMES};
+
+use super::app_picker;
 
 pub struct PresetsPage {
     ctx: Rc<AppCtx>,
@@ -17,6 +19,45 @@ pub struct PresetsPage {
     enabled: adw::SwitchRow,
     status: adw::ActionRow,
     updating: Rc<Cell<bool>>,
+    /// Widgets of each rule row that get the red outline when the rule has a problem.
+    marks: RefCell<Vec<RuleMarks>>,
+    /// Explains the red outlines.
+    problem_note: gtk::Label,
+}
+
+struct RuleMarks {
+    id: String,
+    row: gtk::Widget,
+    /// Days and time window: where a conflict is.
+    slot: Vec<gtk::Widget>,
+    /// The application button: where a missing application is.
+    app: gtk::Widget,
+}
+
+const INVALID: &str = "gifdeck-invalid";
+
+fn mark(w: &gtk::Widget, bad: bool, tip: &str) {
+    if bad {
+        w.add_css_class(INVALID);
+    } else {
+        w.remove_css_class(INVALID);
+    }
+    // Only ever set a tooltip on the widgets we flag; leave the others' own tooltips alone.
+    if bad {
+        w.set_tooltip_text(Some(tip));
+    }
+}
+
+fn app_button_child(app: &Option<AppRef>) -> gtk::Box {
+    let b = gtk::Box::builder().spacing(6).build();
+    match app {
+        Some(a) => {
+            b.append(&app_picker::icon_of(a));
+            b.append(&gtk::Label::new(Some(&a.name)));
+        }
+        None => b.append(&gtk::Label::new(Some("Choose application…"))),
+    }
+    b
 }
 
 fn flat_button(icon: &str, tip: &str) -> gtk::Button {
@@ -68,8 +109,16 @@ impl PresetsPage {
         schedule_group.add(&enabled);
         schedule_group.add(&h24);
         schedule_group.add(&status);
+        let problem_note = gtk::Label::builder()
+            .label("Rules outlined in red overlap another rule for the same application, or are missing their application. They are not saved until fixed.")
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["error"])
+            .visible(false)
+            .build();
         let rules_group = adw::PreferencesGroup::new();
         rules_group.add(&rule_list);
+        rules_group.add(&problem_note);
 
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(12).margin_bottom(18).margin_start(12).margin_end(12).build();
         content.append(&presets_group);
@@ -86,6 +135,8 @@ impl PresetsPage {
             enabled,
             status,
             updating: Rc::new(Cell::new(false)),
+            marks: RefCell::new(Vec::new()),
+            problem_note,
         });
 
         {
@@ -122,6 +173,7 @@ impl PresetsPage {
         let mut leader: Option<gtk::CheckButton> = None;
         for p in &presets {
             let row = adw::EntryRow::builder().title("Name").text(&p.name).build();
+            super::set_rename_icon(&row);
             let radio = gtk::CheckButton::builder().valign(gtk::Align::Center).tooltip_text("Use this preset").build();
             match &leader {
                 Some(l) => radio.set_group(Some(l)),
@@ -179,6 +231,32 @@ impl PresetsPage {
             (None, _) => "No rules yet".to_string(),
         };
         self.status.set_subtitle(&glib::markup_escape_text(&text));
+        self.update_marks();
+    }
+
+    /// Red outline on whatever makes a rule invalid (in place: no rebuild while the user is typing).
+    fn update_marks(&self) {
+        let problems = model::problems(&self.ctx.state.borrow().rules);
+        let rules: Vec<String> = self.ctx.state.borrow().rules.iter().map(|r| r.id.clone()).collect();
+        let marks = self.marks.borrow();
+        for (id, problem) in rules.iter().zip(&problems) {
+            let Some(m) = marks.iter().find(|m| &m.id == id) else { continue };
+            let conflict = *problem == Some(Problem::Conflict);
+            let missing = *problem == Some(Problem::MissingApp);
+            mark(&m.row, problem.is_some(), "");
+            m.row.set_tooltip_text(None);
+            for w in &m.slot {
+                mark(w, conflict, "Overlaps another rule for the same application at the same time");
+                if !conflict {
+                    w.set_tooltip_text(None);
+                }
+            }
+            mark(&m.app, missing, "Choose the application that has to be open");
+            if !missing {
+                m.app.set_tooltip_text(None);
+            }
+        }
+        self.problem_note.set_visible(problems.iter().any(Option::is_some));
     }
 
     pub fn rebuild_rules(self: &Rc<Self>) {
@@ -189,6 +267,7 @@ impl PresetsPage {
             (st.rules.clone(), st.presets.iter().map(|p| (p.id.clone(), p.name.clone())).collect::<Vec<_>>())
         };
         let total = rules.len();
+        self.marks.borrow_mut().clear();
         for (i, rule) in rules.iter().enumerate() {
             self.rule_list.append(&self.build_rule(rule, i, total, &presets));
         }
@@ -270,6 +349,37 @@ impl PresetsPage {
         wrap.append(&all_day);
         wrap.append(&window);
 
+        // "Only if application is open"
+        let only_open = gtk::CheckButton::builder().label("Only if application is open").active(rule.only_if_open).valign(gtk::Align::Center).build();
+        if self.ctx.env.backend != crate::env::Backend::X11 {
+            only_open.set_tooltip_text(Some("Needs X11: other sessions cannot see which applications are open"));
+        }
+        let app_btn = gtk::Button::builder().child(&app_button_child(&rule.app)).valign(gtk::Align::Center).visible(rule.only_if_open).build();
+        {
+            let (edit, updating, app_btn) = (edit.clone(), self.updating.clone(), app_btn.clone());
+            only_open.connect_toggled(move |s| {
+                let on = s.is_active();
+                app_btn.set_visible(on);
+                if !updating.get() {
+                    edit(Box::new(move |r| r.only_if_open = on));
+                }
+            });
+        }
+        {
+            let (edit, root) = (edit.clone(), self.root.clone());
+            let button = app_btn.clone();
+            app_btn.connect_clicked(move |_| {
+                let (edit, button) = (edit.clone(), button.clone());
+                app_picker::pick_app(&root, move |a| {
+                    button.set_child(Some(&app_button_child(&Some(a.clone()))));
+                    edit(Box::new(move |r| r.app = Some(a)));
+                });
+            });
+        }
+        let gate_line = super::wrap_row(0);
+        gate_line.append(&only_open);
+        gate_line.append(&app_btn);
+
         // order + delete
         let up = flat_button("go-up-symbolic", "Check this rule earlier");
         let down = flat_button("go-down-symbolic", "Check this rule later");
@@ -291,6 +401,16 @@ impl PresetsPage {
         for b in [&up, &down, &del] {
             wrap.append(b);
         }
-        gtk::ListBoxRow::builder().activatable(false).child(&wrap).build()
+        let stack = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_bottom(6).build();
+        stack.append(&wrap);
+        stack.append(&gate_line);
+        let row = gtk::ListBoxRow::builder().activatable(false).child(&stack).build();
+        self.marks.borrow_mut().push(RuleMarks {
+            id: rule.id.clone(),
+            row: row.clone().upcast(),
+            slot: vec![days_box.upcast(), all_day.upcast(), window.upcast()],
+            app: app_btn.upcast(),
+        });
+        row
     }
 }

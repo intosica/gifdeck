@@ -271,6 +271,11 @@ pub struct WidgetConfig {
     pub keep_inside: bool,
     pub app: Option<AppRef>,
     pub app_mode: AppMode,
+    /// Connector name of the monitor the widget lives on (e.g. "HDMI-1"); `x`/`y` are then
+    /// relative to that monitor. `None` = the primary monitor / global coordinates (old files).
+    pub monitor: Option<String>,
+    /// X11, "per workspace" mode: the (0-based) workspace the widget belongs to; `None` = all.
+    pub workspace: Option<u32>,
 }
 
 impl Default for WidgetConfig {
@@ -295,6 +300,8 @@ impl Default for WidgetConfig {
             keep_inside: false,
             app: None,
             app_mode: AppMode::Always,
+            monitor: None,
+            workspace: None,
         }
     }
 }
@@ -353,6 +360,9 @@ pub struct Rule {
     pub start: u16,
     /// Minutes since midnight, exclusive. `end < start` means "past midnight".
     pub end: u16,
+    /// "Only if application is open": the rule applies only while `app` has a window.
+    pub only_if_open: bool,
+    pub app: Option<AppRef>,
 }
 
 impl Default for Rule {
@@ -364,11 +374,38 @@ impl Default for Rule {
             all_day: true,
             start: 9 * 60,
             end: 17 * 60,
+            only_if_open: false,
+            app: None,
         }
     }
 }
 
+/// Why a rule cannot be used (and so is not saved).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Problem {
+    /// "Only if application is open" is on, but no application was chosen.
+    MissingApp,
+    /// Another rule for the same application (or both without one) selects a different preset
+    /// in at least one same day/time slot.
+    Conflict,
+}
+
 impl Rule {
+    /// The application this rule waits for, if it is gated.
+    fn gate(&self) -> Option<&AppRef> {
+        if self.only_if_open { self.app.as_ref() } else { None }
+    }
+
+    /// Both rules compete for the same "scope": the same application, or no application at all.
+    fn same_scope(&self, o: &Rule) -> bool {
+        self.only_if_open == o.only_if_open && self.app.as_ref().map(|a| &a.id) == o.app.as_ref().map(|a| &a.id)
+    }
+
+    /// Do the two rules pick different presets in some shared day/time slot of one scope?
+    pub fn conflicts(&self, o: &Rule) -> bool {
+        self.preset != o.preset && self.same_scope(o) && (0..7).any(|d| (0..1440u16).any(|m| self.matches(d, m) && o.matches(d, m)))
+    }
+
     /// `day`: 0 = Monday … 6 = Sunday. `minute`: minutes since midnight.
     pub fn matches(&self, day: usize, minute: u16) -> bool {
         let day = day % 7;
@@ -396,9 +433,41 @@ pub fn fmt_time(m: u16, h24: bool) -> String {
     }
 }
 
-/// First matching rule wins (rules are ordered by the user).
-pub fn evaluate(rules: &[Rule], day: usize, minute: u16) -> Option<&Rule> {
-    rules.iter().find(|r| r.matches(day, minute))
+/// One entry per rule: what is wrong with it, if anything. Conflicting rules are both reported.
+pub fn problems(rules: &[Rule]) -> Vec<Option<Problem>> {
+    rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            if r.only_if_open && r.app.is_none() {
+                Some(Problem::MissingApp)
+            } else if rules.iter().enumerate().any(|(j, o)| i != j && r.conflicts(o)) {
+                Some(Problem::Conflict)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The rules that may be saved and used. Of two conflicting rules the earlier one is kept, so an
+/// old file with overlaps loses the least.
+pub fn usable(rules: &[Rule]) -> Vec<&Rule> {
+    let mut kept: Vec<&Rule> = Vec::new();
+    for r in rules {
+        if !(r.only_if_open && r.app.is_none()) && !kept.iter().any(|k| k.conflicts(r)) {
+            kept.push(r);
+        }
+    }
+    kept
+}
+
+/// The rule in force: rules waiting for an open application come first (while it is open),
+/// then the rules without one. Within each group the first matching rule wins (user order).
+pub fn evaluate<'a>(rules: &'a [Rule], wins: &[Win], day: usize, minute: u16) -> Option<&'a Rule> {
+    let usable = usable(rules);
+    let hit = |gated: bool| usable.iter().copied().find(|r| r.matches(day, minute) && r.only_if_open == gated && (!gated || r.gate().is_some_and(|a| app_open(a, wins, false))));
+    hit(true).or_else(|| hit(false))
 }
 
 /// Current (weekday 0=Mon, minute-of-day) in local time.
@@ -431,6 +500,8 @@ pub struct AppState {
     pub time_24h: bool,
     pub storage: Storage,
     pub masks: Vec<Mask>,
+    /// X11 master switch: widgets belong to a workspace instead of showing on all of them.
+    pub per_workspace: bool,
 }
 
 impl Default for AppState {
@@ -448,6 +519,7 @@ impl Default for AppState {
             time_24h: true,
             storage: Storage::default(),
             masks: Vec::new(),
+            per_workspace: false,
         }
     }
 }
@@ -485,7 +557,8 @@ impl AppState {
             return;
         }
         let tmp = dir.join("state.json.tmp");
-        if let Ok(json) = serde_json::to_string_pretty(self) {
+        // Rules with a problem (conflict, missing application) stay on screen, flagged, but are never saved.
+        if let Ok(json) = serde_json::to_string_pretty(&self.saved_copy()) {
             // Write + rename so a crash never leaves a half-written file.
             if fs::write(&tmp, json).is_ok() {
                 let _ = fs::rename(&tmp, Self::file());
@@ -541,6 +614,11 @@ pub fn app_open(app: &AppRef, wins: &[Win], showing_only: bool) -> bool {
 }
 
 impl AppState {
+    /// The state as written to disk: only rules that are valid.
+    fn saved_copy(&self) -> AppState {
+        AppState { rules: usable(&self.rules).into_iter().cloned().collect(), ..self.clone() }
+    }
+
     /// What should really be on screen: the active preset's widgets after the master switch,
     /// the blacklist and each widget's application rule.
     pub fn effective_widgets(&self, wins: &[Win]) -> Vec<WidgetConfig> {
@@ -617,16 +695,83 @@ mod tests {
         assert!(r.matches(2, 999));
     }
 
+    fn with_preset(mut r: Rule, preset: &str) -> Rule {
+        r.preset = preset.into();
+        r
+    }
+
+    fn gated(mut r: Rule, key: &str) -> Rule {
+        r.only_if_open = true;
+        r.app = Some(AppRef { id: key.into(), keys: vec![key.into()], ..Default::default() });
+        r
+    }
+
+    fn picked<'a>(rules: &'a [Rule], wins: &[Win], day: usize, minute: u16) -> Option<&'a str> {
+        evaluate(rules, wins, day, minute).map(|r| r.preset.as_str())
+    }
+
     #[test]
-    fn first_matching_rule_wins() {
-        let mut a = rule(&[0], 0, 0);
-        a.preset = "a".into();
-        let mut b = Rule { preset: "b".into(), ..Default::default() }; // every day
-        b.all_day = true;
-        let rules = vec![a, b];
-        assert_eq!(evaluate(&rules, 0, 600).map(|r| r.preset.as_str()), Some("a"));
-        assert_eq!(evaluate(&rules, 1, 600).map(|r| r.preset.as_str()), Some("b"));
-        assert!(evaluate(&[], 0, 0).is_none());
+    fn disjoint_rules_do_not_conflict() {
+        let rules = vec![with_preset(rule(&[0], 0, 0), "a"), with_preset(rule(&[1], 0, 0), "b"), with_preset(rule(&[0], 600, 700), "a")];
+        assert_eq!(problems(&rules), vec![None, None, None]); // same preset overlapping is harmless
+        assert_eq!(picked(&rules, &[], 0, 600), Some("a"));
+        assert_eq!(picked(&rules, &[], 1, 600), Some("b"));
+        assert_eq!(picked(&rules, &[], 2, 600), None);
+        assert!(evaluate(&[], &[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn overlapping_schedules_are_flagged_and_not_saved() {
+        // 16:00-04:00 every day vs. Thursday 03:00-05:00: they share Thursday 03:00-04:00.
+        let night = with_preset(rule(&[0, 1, 2, 3, 4, 5, 6], 16 * 60, 4 * 60), "night");
+        let early = with_preset(rule(&[3], 3 * 60, 5 * 60), "early");
+        let rules = vec![night, early.clone()];
+        assert_eq!(problems(&rules), vec![Some(Problem::Conflict), Some(Problem::Conflict)]);
+        assert_eq!(usable(&rules).len(), 1); // the earlier rule is kept
+        assert_eq!(picked(&rules, &[], 3, 3 * 60 + 30), Some("night"));
+        // moving the second rule out of the way clears both
+        let early = Rule { start: 4 * 60, end: 6 * 60, ..early };
+        assert_eq!(problems(&[rules[0].clone(), early]), vec![None, None]);
+    }
+
+    #[test]
+    fn only_one_preset_per_application() {
+        let a = gated(with_preset(rule(&[0], 0, 0), "a"), "term");
+        let b = gated(with_preset(rule(&[0], 0, 0), "b"), "term");
+        let other = gated(with_preset(rule(&[0], 0, 0), "b"), "game");
+        let plain = with_preset(rule(&[0], 0, 0), "c");
+        let rules = vec![a.clone(), b, other, plain];
+        assert_eq!(problems(&rules), vec![Some(Problem::Conflict), Some(Problem::Conflict), None, None]);
+        assert_eq!(usable(&rules).len(), 3);
+    }
+
+    #[test]
+    fn open_application_rules_come_first() {
+        let term = gated(with_preset(rule(&[0], 0, 0), "work"), "term");
+        let plain = with_preset(rule(&[0], 0, 0), "plain");
+        // The same slot for an application and for "anything" is not a conflict: the app wins while open.
+        let rules = vec![plain, term];
+        assert_eq!(problems(&rules), vec![None, None]);
+        let win = Win { keys: vec!["term".into()], minimized: false };
+        assert_eq!(picked(&rules, &[], 0, 600), Some("plain"));
+        assert_eq!(picked(&rules, &[win], 0, 600), Some("work"));
+    }
+
+    #[test]
+    fn gated_rule_without_application_is_incomplete() {
+        let mut r = with_preset(rule(&[0], 0, 0), "a");
+        r.only_if_open = true;
+        assert_eq!(problems(&[r.clone()]), vec![Some(Problem::MissingApp)]);
+        assert!(usable(&[r.clone()]).is_empty());
+        assert!(picked(&[r], &[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn invalid_rules_never_reach_the_file() {
+        let a = with_preset(rule(&[0], 0, 0), "a");
+        let b = with_preset(rule(&[0], 0, 0), "b");
+        let st = AppState { rules: vec![a, b], ..Default::default() };
+        assert_eq!(st.saved_copy().rules.len(), 1);
     }
 
     #[test]

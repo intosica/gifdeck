@@ -17,6 +17,7 @@ use crate::env::{Backend, Env};
 use crate::layer_host::LayerHost;
 use crate::media::Anim;
 use crate::model::WidgetConfig;
+use crate::monitors;
 use crate::x11;
 
 pub type MovedCb = Rc<dyn Fn(&str, i32, i32)>;
@@ -27,11 +28,15 @@ pub enum Backing {
     Hosted(Rc<LayerHost>),
 }
 
+/// X11 workspace placement: (on every workspace, the one workspace it belongs to otherwise).
+pub type Workspace = (bool, Option<u32>);
+
 pub struct WidgetWindow {
     /// The configuration this widget currently reflects.
     pub cfg: WidgetConfig,
     pub backing: Backing,
     view: Option<AnimView>,
+    ws: Workspace,
 }
 
 /// The box a widget occupies: its scaled picture, grown to fit when rotated.
@@ -52,11 +57,11 @@ impl WidgetWindow {
     /// Show the widget inside a shared layer surface.
     pub fn build_hosted(host: &Rc<LayerHost>, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>) -> WidgetWindow {
         host.upsert(cfg, anim, mask);
-        WidgetWindow { cfg: cfg.clone(), backing: Backing::Hosted(host.clone()), view: None }
+        WidgetWindow { cfg: cfg.clone(), backing: Backing::Hosted(host.clone()), view: None, ws: (true, None) }
     }
 
     /// Show the widget in its own window.
-    pub fn build_window(app: &adw::Application, env: &Env, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>, on_closed: ClosedCb) -> WidgetWindow {
+    pub fn build_window(app: &adw::Application, env: &Env, cfg: &WidgetConfig, anim: &Rc<Anim>, mask: Option<Rc<Anim>>, ws: Workspace, on_closed: ClosedCb) -> WidgetWindow {
         let (w, h) = placed_size(anim, cfg.scale, cfg.angle);
         let (cw, ch) = scaled_size(anim, cfg.scale);
         let view = AnimView::new(anim.clone(), cw, ch, mask);
@@ -85,15 +90,15 @@ impl WidgetWindow {
 
         if env.backend == Backend::X11 {
             let level = cfg.level;
-            let (x, y) = (cfg.x, cfg.y);
+            let (x, y) = monitors::to_global(cfg.monitor.as_deref(), cfg.x, cfg.y);
             window.connect_realize(move |win| {
                 if let Some(xid) = x11::xid_of(win) {
-                    x11::set_initial_state(xid, level);
+                    x11::set_initial_state(xid, level, ws.0, ws.1);
                 }
             });
             window.connect_map(move |win| {
                 if let Some(xid) = x11::xid_of(win) {
-                    x11::apply_state(xid, level);
+                    x11::apply_state(xid, level, ws.0, ws.1);
                     x11::move_to(xid, x, y);
                 }
             });
@@ -114,7 +119,7 @@ impl WidgetWindow {
         });
 
         window.present();
-        WidgetWindow { cfg: cfg.clone(), backing: Backing::Window(window), view: Some(view) }
+        WidgetWindow { cfg: cfg.clone(), backing: Backing::Window(window), view: Some(view), ws }
     }
 
     /// Show another picture (folder rotation) without rebuilding the window.
@@ -147,8 +152,8 @@ impl WidgetWindow {
     }
 
     /// Apply changes that do not need a rebuild.
-    pub fn apply_live(&mut self, env: &Env, cfg: &WidgetConfig) {
-        let moved = (cfg.x, cfg.y) != (self.cfg.x, self.cfg.y);
+    pub fn apply_live(&mut self, env: &Env, cfg: &WidgetConfig, ws: Workspace) {
+        let moved = (cfg.x, cfg.y, &cfg.monitor) != (self.cfg.x, self.cfg.y, &self.cfg.monitor);
         match &self.backing {
             Backing::Hosted(host) => {
                 host.set_opacity(&cfg.id, cfg.opacity);
@@ -164,9 +169,16 @@ impl WidgetWindow {
                     v.set_opacity(cfg.opacity);
                     v.set_mask_look(cfg.mask_opacity, cfg.mask_xf);
                 }
-                if moved && env.backend == Backend::X11 {
+                if env.backend == Backend::X11 {
                     if let Some(xid) = x11::xid_of(window) {
-                        x11::move_to(xid, cfg.x, cfg.y);
+                        if ws != self.ws {
+                            x11::apply_state(xid, cfg.level, ws.0, ws.1);
+                            self.ws = ws;
+                        }
+                        if moved {
+                            let (x, y) = monitors::to_global(cfg.monitor.as_deref(), cfg.x, cfg.y);
+                            x11::move_to(xid, x, y);
+                        }
                     }
                 }
             }
@@ -174,7 +186,7 @@ impl WidgetWindow {
         self.cfg = cfg.clone();
     }
 
-    /// X11 only: where the window manager has put the window.
+    /// X11 only: where the window manager has put the window (global coordinates).
     pub fn x11_position(&self) -> Option<(i32, i32)> {
         match &self.backing {
             Backing::Window(w) => x11::xid_of(w).and_then(x11::position),
@@ -188,11 +200,11 @@ impl WidgetWindow {
         if !(self.cfg.snap_edges || self.cfg.keep_inside) {
             return pos;
         }
-        let Some(mon) = gtk::gdk::Display::default().and_then(|d| d.monitors().item(0)).and_downcast::<gtk::gdk::Monitor>() else { return pos };
-        let g = mon.geometry();
-        let rel = (pos.0 - g.x(), pos.1 - g.y());
-        let r = crate::layer_host::place(rel, (w.width(), w.height()), (g.width(), g.height()), self.cfg.keep_inside, self.cfg.snap_edges);
-        (r.0 + g.x(), r.1 + g.y())
+        // The monitor the window is on, not just the first one.
+        let Some((_, mx, my, mw, mh)) = monitors::locate(pos.0, pos.1) else { return pos };
+        let rel = (pos.0 - mx, pos.1 - my);
+        let r = crate::layer_host::place(rel, (w.width(), w.height()), (mw, mh), self.cfg.keep_inside, self.cfg.snap_edges);
+        (r.0 + mx, r.1 + my)
     }
 
     pub fn raise_x11(&self) {

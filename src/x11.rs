@@ -33,6 +33,9 @@ struct Conn {
     client_list: u32,
     hidden: u32,
     gtk_app_id: u32,
+    wm_desktop: u32,
+    current_desktop: u32,
+    number_of_desktops: u32,
 }
 
 impl Conn {
@@ -50,17 +53,30 @@ impl Conn {
         let client_list = atom("_NET_CLIENT_LIST")?;
         let hidden = atom("_NET_WM_STATE_HIDDEN")?;
         let gtk_app_id = atom("_GTK_APPLICATION_ID")?;
-        Some(Conn { conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents, client_list, hidden, gtk_app_id })
+        let wm_desktop = atom("_NET_WM_DESKTOP")?;
+        let current_desktop = atom("_NET_CURRENT_DESKTOP")?;
+        let number_of_desktops = atom("_NET_NUMBER_OF_DESKTOPS")?;
+        Some(Conn { conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents, client_list, hidden, gtk_app_id, wm_desktop, current_desktop, number_of_desktops })
     }
 
-    /// Atoms that should be set for `level`.
-    fn wanted(&self, level: Level) -> Vec<u32> {
+    /// Atoms that should be set for `level`; `sticky` = visible on every workspace.
+    fn wanted(&self, level: Level, sticky: bool) -> Vec<u32> {
         let mut v = vec![self.skip_taskbar, self.skip_pager];
         match level {
-            Level::Top => v.extend([self.above, self.sticky]),
-            Level::Desktop => v.extend([self.below, self.sticky]),
+            Level::Top => v.push(self.above),
+            Level::Desktop => v.push(self.below),
             Level::Normal => {}
         }
+        if sticky {
+            v.push(self.sticky);
+        }
+        v
+    }
+
+    /// A root-window cardinal such as `_NET_CURRENT_DESKTOP`.
+    fn root_cardinal(&self, atom: u32) -> Option<u32> {
+        let r = self.conn.get_property(false, self.root, atom, AtomEnum::CARDINAL, 0, 1).ok()?.reply().ok()?;
+        let v = r.value32()?.next();
         v
     }
 
@@ -89,18 +105,23 @@ pub fn xid_of(window: &gtk::Window) -> Option<u32> {
 
 /// Set the initial `_NET_WM_STATE` *before* the window is mapped, so the
 /// window manager puts it into the right layer from the first frame.
-pub fn set_initial_state(xid: u32, level: Level) {
+///
+/// `sticky`: on every workspace. `desktop`: the one workspace (0-based) it belongs to otherwise.
+pub fn set_initial_state(xid: u32, level: Level, sticky: bool, desktop: Option<u32>) {
     with_conn(|c| {
-        let atoms = c.wanted(level);
+        let atoms = c.wanted(level, sticky);
         let _ = c.conn.change_property32(PropMode::REPLACE, xid, c.net_wm_state, AtomEnum::ATOM, &atoms);
+        if let (false, Some(d)) = (sticky, desktop) {
+            let _ = c.conn.change_property32(PropMode::REPLACE, xid, c.wm_desktop, AtomEnum::CARDINAL, &[d]);
+        }
         let _ = c.conn.flush();
     });
 }
 
 /// (Re)apply the state of a *mapped* window: add what `level` wants, remove the layer atoms it does not.
-pub fn apply_state(xid: u32, level: Level) {
+pub fn apply_state(xid: u32, level: Level, sticky: bool, desktop: Option<u32>) {
     with_conn(|c| {
-        let wanted = c.wanted(level);
+        let wanted = c.wanted(level, sticky);
         for atom in [c.above, c.below, c.sticky] {
             if !wanted.contains(&atom) {
                 c.send_state(xid, 0, atom);
@@ -109,8 +130,23 @@ pub fn apply_state(xid: u32, level: Level) {
         for atom in wanted {
             c.send_state(xid, 1, atom);
         }
+        if let (false, Some(d)) = (sticky, desktop) {
+            let ev = ClientMessageEvent::new(32, xid, c.wm_desktop, [d, 1, 0, 0, 0]);
+            let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+            let _ = c.conn.send_event(false, c.root, mask, ev);
+        }
         let _ = c.conn.flush();
     });
+}
+
+/// The workspace (0-based) the user is looking at.
+pub fn current_desktop() -> Option<u32> {
+    with_conn(|c| c.root_cardinal(c.current_desktop)).flatten()
+}
+
+/// How many workspaces the window manager has right now.
+pub fn desktop_count() -> Option<u32> {
+    with_conn(|c| c.root_cardinal(c.number_of_desktops)).flatten()
 }
 
 pub fn move_to(xid: u32, x: i32, y: i32) {

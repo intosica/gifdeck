@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>dev.gifdeck.GifDeck</id>
   <name>GifDeck</name>
-  <summary>Animated GIF and PNG widgets for your desktop</summary>
+  <summary>Animated GIF, PNG and WebP widgets for your desktop</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <url type="homepage">https://github.com/YOUR-NAME/gifdeck</url>
@@ -10,7 +10,7 @@
     <name>GifDeck</name>
   </developer>
   <description>
-    <p>GifDeck puts animated GIFs and PNG images on your desktop as independent widgets, all managed from one small window and one background process.</p>
+    <p>GifDeck puts animated GIFs, WebPs and PNG images on your desktop as independent widgets, all managed from one small window and one background process.</p>
     <ul>
       <li>Per-widget layers: normal, always on top, or pinned behind your windows</li>
       <li>Borderless transparent widgets, or standard window decorations</li>

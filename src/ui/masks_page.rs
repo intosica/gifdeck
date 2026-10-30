@@ -1,4 +1,4 @@
-//! "Masks" page: saved GIF / PNG shapes that widgets can be clipped to (animated ones play).
+//! "Masks" page: saved GIF / PNG / WebP shapes that widgets can be clipped to (animated ones play).
 
 use std::rc::Rc;
 
@@ -19,7 +19,7 @@ impl MasksPage {
     pub fn new(ctx: &Rc<AppCtx>) -> Rc<MasksPage> {
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
         let hint = gtk::Label::builder()
-            .label("No masks yet.\nPress Add or drop GIF or PNG files here.\nThe alpha channel is the shape; animated GIFs animate it.")
+            .label("No masks yet.\nPress Add or drop GIF, PNG or WebP files here.\nThe alpha channel is the shape; animated GIFs and WebPs animate it.")
             .justify(gtk::Justification::Center)
             .css_classes(["dim-label"])
             .margin_top(24)
@@ -45,8 +45,9 @@ impl MasksPage {
             let ctx = ctx.clone();
             add.connect_clicked(move |btn| {
                 let filter = gtk::FileFilter::new();
-                filter.set_name(Some("GIF and PNG images"));
+                filter.set_name(Some("GIF, PNG and WebP images"));
                 filter.add_mime_type("image/png");
+                filter.add_mime_type("image/webp");
                 filter.add_mime_type("image/gif");
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
