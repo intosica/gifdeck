@@ -293,7 +293,7 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
         let group = adw::PreferencesGroup::builder().title("Workspaces").build();
         let per_ws = adw::SwitchRow::builder()
             .title("Widgets per workspace")
-            .subtitle("Off: widgets show on every workspace. On: each widget gets its own workspace setting, and the Widgets tab lists only the current workspace's widgets.")
+            .subtitle("Each widget can be bound to a workspace (Bound to workspace, in its settings). On: new widgets are bound to the workspace you add them on, and the Widgets tab lists only the current workspace's widgets.")
             .active(ctx.state.borrow().per_workspace)
             .build();
         {

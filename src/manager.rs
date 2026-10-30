@@ -157,13 +157,10 @@ impl Manager {
 
     /// Where an X11 window belongs with respect to workspaces.
     fn workspace(&self, cfg: &WidgetConfig) -> Workspace {
-        if self.per_workspace.get() {
-            match cfg.workspace {
-                Some(d) => (false, Some(d.min(crate::x11::desktop_count().unwrap_or(1).saturating_sub(1)))),
-                None => (true, None),
-            }
-        } else {
-            (cfg.level != Level::Normal, None)
+        // Whatever the layer: bound to one workspace, or (sticky) on all of them.
+        match cfg.workspace {
+            Some(d) => (false, Some(d.min(crate::x11::desktop_count().unwrap_or(1).saturating_sub(1)))),
+            None => (true, None),
         }
     }
 

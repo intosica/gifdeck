@@ -340,17 +340,17 @@ impl WidgetsPage {
             .selected(monitor_sel)
             .build();
 
-        // Workspace (X11, only when the master switch in Settings is on).
-        let per_workspace = ctx.env.backend == crate::env::Backend::X11 && ctx.state.borrow().per_workspace;
+        // Bound to workspace (X11): applies to every layer.
+        let x11_ws = ctx.env.backend == crate::env::Backend::X11;
         let ws_count = crate::x11::desktop_count().unwrap_or(1).max(cfg.workspace.map_or(1, |w| w + 1));
         let ws_labels: Vec<String> = std::iter::once("All workspaces".to_string()).chain((1..=ws_count).map(|i| format!("Workspace {i}"))).collect();
         let ws_labels: Vec<&str> = ws_labels.iter().map(String::as_str).collect();
         let workspace = adw::ComboRow::builder()
-            .title("Workspace")
-            .subtitle("Widgets of other workspaces are hidden from this list while you are not on them")
+            .title("Bound to workspace")
+            .subtitle("Show this widget only on one workspace, whatever its layer")
             .model(&gtk::StringList::new(&ws_labels))
             .selected(cfg.workspace.map_or(0, |w| w + 1))
-            .visible(per_workspace)
+            .visible(x11_ws)
             .build();
 
         let snap = adw::SwitchRow::builder().title("Snap to screen edges").subtitle("While dragging, stick to an edge when close").active(cfg.snap_edges).build();
