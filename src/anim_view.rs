@@ -16,6 +16,7 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, gsk};
 
+use crate::blend::{self, BlendMode};
 use crate::mask_xf::{self, Affine, Handle};
 use crate::media::Anim;
 use crate::model::{MaskXf, WidgetConfig};
@@ -50,6 +51,10 @@ mod imp {
         pub mask_alpha: Cell<f64>,
         pub speed: Cell<f64>,
         pub mask_speed: Cell<f64>,
+        pub mask_blend: Cell<BlendMode>,
+        pub blend: Cell<BlendMode>,
+        pub mask_feather: Cell<f64>,
+        pub feather: Cell<f64>,
         pub xf: Cell<MaskXf>,
         /// Rotation of the whole picture, in degrees.
         pub angle: Cell<f64>,
@@ -179,47 +184,81 @@ mod imp {
             let mask_tex = mask.as_ref().map(|m| m.frames[self.mask_frame.get() % m.frames.len()].0.clone());
             let mask_xf = gsk_of(&Affine::of(&xf, cw as f64, ch as f64));
 
+            let k = self.mask_alpha.get();
+            let (mask_feather, feather) = (self.mask_feather.get(), self.feather.get());
+            // The mask image placed over the picture, softened by its feather.
+            let put_mask = |s: &gtk::Snapshot, tex: &gtk::gdk::Texture| {
+                if mask_feather > 0.0 {
+                    s.push_blur(mask_feather);
+                }
+                s.save();
+                s.transform(Some(&mask_xf));
+                s.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
+                s.restore();
+                if mask_feather > 0.0 {
+                    s.pop();
+                }
+            };
+            // The picture, clipped by the mask and with its own outline faded by `feather`.
+            let picture = |s: &gtk::Snapshot| {
+                if feather > 0.0 {
+                    s.push_mask(gsk::MaskMode::Alpha);
+                    s.push_blur(feather);
+                    s.append_color(&gtk::gdk::RGBA::WHITE, &rect.inset_r(feather as f32, feather as f32));
+                    s.pop();
+                    s.pop();
+                }
+                if let Some(tex) = &mask_tex {
+                    s.push_mask(gsk::MaskMode::Alpha);
+                    // Overall strength k: clip alpha = (1-k) + k*mask, i.e. a cross-fade from "no clip" to the mask.
+                    if k < 1.0 {
+                        s.push_cross_fade(k);
+                        s.append_color(&gtk::gdk::RGBA::BLACK, &rect);
+                        s.pop();
+                    }
+                    put_mask(s, tex);
+                    if k < 1.0 {
+                        s.pop();
+                    }
+                    s.pop();
+                }
+                s.append_scaled_texture(texture, filter, &rect);
+                if mask_tex.is_some() {
+                    s.pop();
+                }
+                if feather > 0.0 {
+                    s.pop();
+                }
+            };
+            // The mask itself, drawn as the user likes it.
+            let opacity = self.mask_opacity.get() * k;
+            let overlay = |s: &gtk::Snapshot| {
+                let Some(tex) = &mask_tex else { return };
+                s.push_opacity(opacity);
+                let colour = mask_xf::color(&xf);
+                if let Some((m, o)) = &colour {
+                    let flat: Vec<f32> = (0..4).flat_map(|c| (0..4).map(move |r| m[r][c])).collect(); // column-major
+                    s.push_color_matrix(&graphene::Matrix::from_float(flat.try_into().unwrap()), &graphene::Vec4::new(o[0], o[1], o[2], o[3]));
+                }
+                put_mask(s, tex);
+                if colour.is_some() {
+                    s.pop();
+                }
+                s.pop();
+            };
+
             snapshot.save();
             snapshot.transform(Some(&gsk_of(&view)));
-            if let Some(tex) = &mask_tex {
-                snapshot.push_mask(gsk::MaskMode::Alpha);
-                // Overall strength k: clip alpha = (1-k) + k*mask, i.e. a cross-fade from "no clip" to the mask.
-                let k = self.mask_alpha.get();
-                if k < 1.0 {
-                    snapshot.push_cross_fade(k);
-                    snapshot.append_color(&gtk::gdk::RGBA::BLACK, &rect);
-                    snapshot.pop();
-                }
-                snapshot.save();
-                snapshot.transform(Some(&mask_xf));
-                snapshot.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
-                snapshot.restore();
-                if k < 1.0 {
-                    snapshot.pop();
-                }
-                snapshot.pop();
-            }
-            snapshot.append_scaled_texture(texture, filter, &rect);
-            if let Some(tex) = &mask_tex {
-                snapshot.pop();
-                // The mask itself, drawn over the picture as the user likes it.
-                let opacity = self.mask_opacity.get() * self.mask_alpha.get();
-                if opacity > 0.0 {
-                    snapshot.push_opacity(opacity);
-                    let colour = mask_xf::color(&xf);
-                    if let Some((m, o)) = &colour {
-                        let flat: Vec<f32> = (0..4).flat_map(|c| (0..4).map(move |r| m[r][c])).collect(); // column-major
-                        snapshot.push_color_matrix(&graphene::Matrix::from_float(flat.try_into().unwrap()), &graphene::Vec4::new(o[0], o[1], o[2], o[3]));
-                    }
-                    snapshot.save();
-                    snapshot.transform(Some(&mask_xf));
-                    snapshot.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
-                    snapshot.restore();
-                    if colour.is_some() {
-                        snapshot.pop();
-                    }
-                    snapshot.pop();
-                }
+            let renderer = self.obj().native().and_then(|n| n.renderer());
+            if mask_tex.is_none() || opacity <= 0.0 {
+                picture(snapshot);
+            } else if self.blend.get() != BlendMode::Normal {
+                blend::draw(snapshot, renderer, self.blend.get(), &rect, &overlay, &picture);
+            } else if self.mask_blend.get() != BlendMode::Normal {
+                blend::draw(snapshot, renderer, self.mask_blend.get(), &rect, &picture, &overlay);
+            } else {
+                picture(snapshot);
+                overlay(snapshot);
             }
             if self.edit.get() {
                 self.draw_handles(snapshot, &xf, cw, ch);
@@ -310,6 +349,10 @@ impl AnimView {
         imp.mask_alpha.set(cfg.mask_alpha);
         imp.speed.set(cfg.speed);
         imp.mask_speed.set(cfg.mask_speed);
+        imp.mask_blend.set(cfg.mask_blend);
+        imp.blend.set(cfg.blend);
+        imp.mask_feather.set(cfg.mask_feather);
+        imp.feather.set(cfg.feather);
         if imp.grab.get().is_none() {
             imp.xf.set(cfg.mask_xf);
         }

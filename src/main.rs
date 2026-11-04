@@ -2,6 +2,7 @@
 
 mod anim_view;
 mod autostart;
+mod blend;
 mod ctx;
 mod env;
 mod layer_host;
@@ -80,6 +81,10 @@ struct Running {
 fn main() -> glib::ExitCode {
     if detach_from_terminal() {
         return glib::ExitCode::SUCCESS;
+    }
+    // Blend modes are GL shaders; in GTK 4.14 only the `gl` renderer runs them (not `ngl` or cairo).
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        std::env::set_var("GSK_RENDERER", "gl"); // ponytail: forced app-wide, drop once ngl supports GLShader
     }
     let app = adw::Application::builder().application_id(autostart::APP_ID).build();
     app.add_main_option(

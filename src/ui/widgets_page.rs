@@ -7,6 +7,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::blend::BlendMode;
 use crate::ctx::AppCtx;
 use crate::media;
 use crate::model::{AppMode, Level, RotMode, SchedEntry, WidgetConfig};
@@ -385,8 +386,19 @@ impl WidgetsPage {
         let mask_speed = adw::SpinRow::with_range(10.0, 500.0, 10.0);
         mask_speed.set_title("Mask speed (%)");
         mask_speed.set_value((cfg.mask_speed * 100.0).round());
+        let blend_labels = BlendMode::ALL.map(|m| m.label());
+        let blend_combo = |title: &str, subtitle: &str, m: BlendMode| adw::ComboRow::builder().title(title).subtitle(subtitle).model(&gtk::StringList::new(&blend_labels)).selected(m.index()).build();
+        let mask_blend = blend_combo("Mask blend mode", "Mask drawn over the widget with this mode", cfg.mask_blend);
+        let blend = blend_combo("Widget blend mode", "Widget drawn over the mask with this mode (wins over the mask mode)", cfg.blend);
+        let mask_feather = adw::SpinRow::with_range(0.0, 200.0, 1.0);
+        mask_feather.set_title("Mask feather (px)");
+        mask_feather.set_value(cfg.mask_feather.round());
+        let feather = adw::SpinRow::with_range(0.0, 200.0, 1.0);
+        feather.set_title("Widget feather (px)");
+        feather.set_subtitle("Fade the widget's own edges");
+        feather.set_value(cfg.feather.round());
         let animated = |p: Option<&std::path::Path>| p.is_some_and(|p| media::kind_dir(p) != "PNGs");
-        let mask_rows: Vec<gtk::Widget> = std::iter::once(edit_sw.clone().upcast()).chain(std::iter::once(mask_speed.clone().upcast())).chain(xf_spins.iter().map(|(r, _)| r.clone().upcast())).collect();
+        let mask_rows: Vec<gtk::Widget> = std::iter::once(edit_sw.clone().upcast()).chain(std::iter::once(mask_speed.clone().upcast())).chain([mask_blend.clone().upcast(), blend.clone().upcast(), mask_feather.clone().upcast()]).chain(xf_spins.iter().map(|(r, _)| r.clone().upcast())).collect();
         for r in &mask_rows {
             r.add_css_class(XF_KEEP);
             r.set_sensitive(cfg.mask.is_some());
@@ -416,6 +428,7 @@ impl WidgetsPage {
             scale.clone().upcast(),
             angle.clone().upcast(),
             opacity.clone().upcast(),
+            feather.clone().upcast(),
             speed.clone().upcast(),
             click.clone().upcast(),
             snap.clone().upcast(),
@@ -510,6 +523,10 @@ impl WidgetsPage {
         on_change!(connect_value_notify, scale, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.scale = v });
         on_change!(connect_value_notify, angle, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| c.angle = v });
         on_change!(connect_value_notify, opacity, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.opacity = v });
+        on_change!(connect_value_notify, feather, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| c.feather = v });
+        on_change!(connect_value_notify, mask_feather, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| c.mask_feather = v });
+        on_change!(connect_selected_notify, mask_blend, |s, c| { let m = BlendMode::from_index(s.selected()); move |c: &mut WidgetConfig| c.mask_blend = m });
+        on_change!(connect_selected_notify, blend, |s, c| { let m = BlendMode::from_index(s.selected()); move |c: &mut WidgetConfig| c.blend = m });
         on_change!(connect_value_notify, speed, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.speed = v });
         on_change!(connect_value_notify, mask_speed, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.mask_speed = v });
         on_change!(connect_active_notify, click, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.click_through = on });

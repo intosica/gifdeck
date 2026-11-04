@@ -42,6 +42,7 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Drag & drop** files/folders onto the window to import (onto the Masks tab: masks).
 
 - **Masks** tab: GIF, PNG or WebP alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else. **Mask overall opacity** scales both the clip and the drawn mask; **Speed (%)** sets playback speed of the widget and, for animated masks, **Mask speed (%)** of the mask.
+- **Blend modes & feather**: a widget with a mask has **Mask blend mode** (mask over widget) and **Widget blend mode** (widget over mask) dropdowns with 32 Photocraft modes (Multiply, Linear Dodge, Linear Light, Overlay, Hue, …), plus **Mask feather (px)** and **Widget feather (px)** sliders for soft edges. Blending uses a GL shader, so gifdeck runs GTK's `gl` renderer.
 
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 

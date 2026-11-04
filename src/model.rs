@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::blend::BlendMode;
+
 /// Which stacking layer a widget lives in.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Level {
@@ -267,6 +269,13 @@ pub struct WidgetConfig {
     /// Playback speed multiplier of the picture / of an animated mask (1.0 = as recorded).
     pub speed: f64,
     pub mask_speed: f64,
+    /// How the visible mask is blended over the widget picture.
+    pub mask_blend: BlendMode,
+    /// How the widget picture is blended over the visible mask (wins over `mask_blend` when set).
+    pub blend: BlendMode,
+    /// Soft edge in pixels: blur of the mask / fade of the widget's own outline.
+    pub mask_feather: f64,
+    pub feather: f64,
     pub mask_xf: MaskXf,
     /// Rotation of the whole picture, in degrees.
     pub angle: f64,
@@ -302,6 +311,10 @@ impl Default for WidgetConfig {
             mask_alpha: 1.0,
             speed: 1.0,
             mask_speed: 1.0,
+            mask_blend: BlendMode::Normal,
+            blend: BlendMode::Normal,
+            mask_feather: 0.0,
+            feather: 0.0,
             mask_xf: MaskXf::default(),
             angle: 0.0,
             snap_edges: false,
