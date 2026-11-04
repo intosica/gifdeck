@@ -36,6 +36,10 @@ struct Conn {
     wm_desktop: u32,
     current_desktop: u32,
     number_of_desktops: u32,
+    window_type: u32,
+    type_normal: u32,
+    type_dock: u32,
+    type_desktop: u32,
 }
 
 impl Conn {
@@ -56,7 +60,11 @@ impl Conn {
         let wm_desktop = atom("_NET_WM_DESKTOP")?;
         let current_desktop = atom("_NET_CURRENT_DESKTOP")?;
         let number_of_desktops = atom("_NET_NUMBER_OF_DESKTOPS")?;
-        Some(Conn { conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents, client_list, hidden, gtk_app_id, wm_desktop, current_desktop, number_of_desktops })
+        let window_type = atom("_NET_WM_WINDOW_TYPE")?;
+        let type_normal = atom("_NET_WM_WINDOW_TYPE_NORMAL")?;
+        let type_dock = atom("_NET_WM_WINDOW_TYPE_DOCK")?;
+        let type_desktop = atom("_NET_WM_WINDOW_TYPE_DESKTOP")?;
+        Some(Conn { window_type, type_normal, type_dock, type_desktop, conn, root, net_wm_state, above, below, sticky, skip_taskbar, skip_pager, frame_extents, client_list, hidden, gtk_app_id, wm_desktop, current_desktop, number_of_desktops })
     }
 
     /// Atoms that should be set for `level`; `sticky` = visible on every workspace.
@@ -147,6 +155,36 @@ pub fn current_desktop() -> Option<u32> {
 /// How many workspaces the window manager has right now.
 pub fn desktop_count() -> Option<u32> {
     with_conn(|c| c.root_cardinal(c.number_of_desktops)).flatten()
+}
+
+/// Whether the window manager keeps `level` widgets away from the screen edges.
+/// Mutter (GNOME) clamps NORMAL windows below the top panel; DOCK / DESKTOP windows may sit anywhere,
+/// but it never lets the user drag them, and it shows them on every workspace, so only sticky,
+/// undecorated widgets of the Top / Desktop level qualify (see `set_free`, `start_drag`).
+pub fn is_free(level: Level, decorated: bool, sticky: bool) -> bool {
+    !decorated && sticky && level != Level::Normal
+}
+
+/// Give the window the type that lets it sit anywhere on screen (`free`), or the ordinary one.
+pub fn set_free(xid: u32, level: Level, free: bool) {
+    with_conn(|c| {
+        let ty = match (free, level) {
+            (true, Level::Top) => c.type_dock,
+            (true, _) => c.type_desktop,
+            _ => c.type_normal,
+        };
+        let _ = c.conn.change_property32(PropMode::REPLACE, xid, c.window_type, AtomEnum::ATOM, &[ty]);
+        let _ = c.conn.flush();
+    });
+}
+
+/// Pointer position on the screen.
+pub fn pointer() -> Option<(i32, i32)> {
+    with_conn(|c| {
+        let r = c.conn.query_pointer(c.root).ok()?.reply().ok()?;
+        Some((r.root_x as i32, r.root_y as i32))
+    })
+    .flatten()
 }
 
 pub fn move_to(xid: u32, x: i32, y: i32) {

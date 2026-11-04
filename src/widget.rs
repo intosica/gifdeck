@@ -7,6 +7,7 @@
 //! * **Hosted**: a child inside a [`LayerHost`], the shared layer-shell surface of
 //!   its layer (Wayland "always on top" / "desktop" widgets).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -80,7 +81,29 @@ impl WidgetWindow {
             .build();
         window.add_css_class("gifdeck-widget");
 
-        if cfg.decorated {
+        let free = env.backend == Backend::X11 && x11::is_free(cfg.level, cfg.decorated, ws.0);
+        if free {
+            // The window manager will not drag these windows, so drag them ourselves.
+            window.set_child(Some(&view));
+            let drag = gtk::GestureDrag::new();
+            drag.set_button(1);
+            let start = Rc::new(Cell::new(((0, 0), (0, 0))));
+            let s = start.clone();
+            let w = window.clone();
+            drag.connect_drag_begin(move |_, _, _| {
+                if let (Some(pos), Some(ptr)) = (x11::xid_of(&w).and_then(x11::position), x11::pointer()) {
+                    s.set((pos, ptr));
+                }
+            });
+            let w = window.clone();
+            drag.connect_drag_update(move |_, _, _| {
+                let ((px, py), (qx, qy)) = start.get();
+                if let (Some(xid), Some((x, y))) = (x11::xid_of(&w), x11::pointer()) {
+                    x11::move_to(xid, px + x - qx, py + y - qy);
+                }
+            });
+            view.add_controller(drag);
+        } else if cfg.decorated {
             window.set_child(Some(&view));
         } else {
             // Lets the compositor / window manager drag the borderless window from anywhere.
@@ -95,11 +118,13 @@ impl WidgetWindow {
             window.connect_realize(move |win| {
                 if let Some(xid) = x11::xid_of(win) {
                     x11::set_initial_state(xid, level, ws.0, ws.1);
+                    x11::set_free(xid, level, free);
                 }
             });
             window.connect_map(move |win| {
                 if let Some(xid) = x11::xid_of(win) {
                     x11::apply_state(xid, level, ws.0, ws.1);
+                    x11::set_free(xid, level, free);
                     x11::move_to(xid, x, y);
                 }
             });
