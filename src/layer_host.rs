@@ -111,6 +111,7 @@ impl LayerHost {
         let view = AnimView::new(anim.clone(), cw, ch, mask);
         view.set_angle(cfg.angle);
         view.set_opacity(cfg.opacity);
+        view.set_look(cfg);
         view.play();
         if !cfg.click_through {
             view.set_cursor_from_name(Some("grab"));

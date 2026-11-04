@@ -25,8 +25,9 @@ struct XfRows {
 type XfSpec = (&'static str, f64, f64, f64, fn(&WidgetConfig) -> f64, fn(&mut WidgetConfig, f64));
 
 /// Mask rows in display units (percent / degrees).
-const XF_SPECS: [XfSpec; 10] = [
+const XF_SPECS: [XfSpec; 11] = [
     ("Mask opacity (%) — 0 only clips", 0.0, 100.0, 5.0, |c| c.mask_opacity * 100.0, |c, v| c.mask_opacity = v / 100.0),
+    ("Mask overall opacity (%) — clip and look", 0.0, 100.0, 5.0, |c| c.mask_alpha * 100.0, |c, v| c.mask_alpha = v / 100.0),
     ("Mask size (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.size * 100.0, |c, v| c.mask_xf.size = v / 100.0),
     ("Mask stretch width (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sx * 100.0, |c, v| c.mask_xf.sx = v / 100.0),
     ("Mask stretch height (%)", 2.0, 2000.0, 5.0, |c| c.mask_xf.sy * 100.0, |c, v| c.mask_xf.sy = v / 100.0),
@@ -315,6 +316,9 @@ impl WidgetsPage {
         let opacity = adw::SpinRow::with_range(10.0, 100.0, 5.0);
         opacity.set_title("Opacity (%)");
         opacity.set_value((cfg.opacity * 100.0).round());
+        let speed = adw::SpinRow::with_range(10.0, 500.0, 10.0);
+        speed.set_title("Speed (%)");
+        speed.set_value((cfg.speed * 100.0).round());
         let click = adw::SwitchRow::builder().title("Click-through").subtitle("Mouse clicks pass through to what is behind. Turn off to move the widget.").active(cfg.click_through).build();
         let x = adw::SpinRow::with_range(-4000.0, 20000.0, 1.0);
         x.set_title("Position X");
@@ -377,11 +381,17 @@ impl WidgetsPage {
                 (r, *sp)
             })
             .collect();
-        let mask_rows: Vec<gtk::Widget> = std::iter::once(edit_sw.clone().upcast()).chain(xf_spins.iter().map(|(r, _)| r.clone().upcast())).collect();
+        // Only an animated mask has a speed.
+        let mask_speed = adw::SpinRow::with_range(10.0, 500.0, 10.0);
+        mask_speed.set_title("Mask speed (%)");
+        mask_speed.set_value((cfg.mask_speed * 100.0).round());
+        let animated = |p: Option<&std::path::Path>| p.is_some_and(|p| media::kind_dir(p) != "PNGs");
+        let mask_rows: Vec<gtk::Widget> = std::iter::once(edit_sw.clone().upcast()).chain(std::iter::once(mask_speed.clone().upcast())).chain(xf_spins.iter().map(|(r, _)| r.clone().upcast())).collect();
         for r in &mask_rows {
             r.add_css_class(XF_KEEP);
             r.set_sensitive(cfg.mask.is_some());
         }
+        mask_speed.set_sensitive(animated(cfg.mask.as_deref()));
         self.xf_rows.borrow_mut().push(XfRows { id: id.clone(), edit: edit_sw.clone(), spins: xf_spins.iter().map(|(r, sp)| (r.clone(), sp.4)).collect() });
 
         // Application rule.
@@ -406,6 +416,7 @@ impl WidgetsPage {
             scale.clone().upcast(),
             angle.clone().upcast(),
             opacity.clone().upcast(),
+            speed.clone().upcast(),
             click.clone().upcast(),
             snap.clone().upcast(),
             keep.clone().upcast(),
@@ -499,6 +510,8 @@ impl WidgetsPage {
         on_change!(connect_value_notify, scale, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.scale = v });
         on_change!(connect_value_notify, angle, |s, c| { let v = s.value(); move |c: &mut WidgetConfig| c.angle = v });
         on_change!(connect_value_notify, opacity, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.opacity = v });
+        on_change!(connect_value_notify, speed, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.speed = v });
+        on_change!(connect_value_notify, mask_speed, |s, c| { let v = s.value() / 100.0; move |c: &mut WidgetConfig| c.mask_speed = v });
         on_change!(connect_active_notify, click, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.click_through = on });
         on_change!(connect_active_notify, snap, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.snap_edges = on });
         on_change!(connect_active_notify, keep, |s, c| { let on = s.is_active(); move |c: &mut WidgetConfig| c.keep_inside = on });
@@ -511,6 +524,7 @@ impl WidgetsPage {
                 for r in &rows {
                     r.set_sensitive(p.is_some());
                 }
+                mask_speed.set_sensitive(animated(p.as_deref()));
                 if p.is_none() {
                     ctx.set_mask_edit(None);
                 }

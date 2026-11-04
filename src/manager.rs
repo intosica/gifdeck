@@ -117,7 +117,7 @@ impl Manager {
         let Some(v) = w.view() else { return };
         let (cb, exit, wid) = (self.on_mask_xf.clone(), self.on_mask_exit.clone(), id.to_string());
         v.set_hooks(Rc::new(move |xf, _| cb(&wid, xf)), exit);
-        v.set_mask_look(w.cfg.mask_opacity, w.cfg.mask_xf);
+        v.set_look(&w.cfg);
         v.set_edit(self.editing.borrow().as_deref() == Some(id));
     }
 

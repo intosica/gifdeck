@@ -67,6 +67,7 @@ impl WidgetWindow {
         let view = AnimView::new(anim.clone(), cw, ch, mask);
         view.set_angle(cfg.angle);
         view.set_opacity(cfg.opacity);
+        view.set_look(cfg);
         view.play();
 
         let window = gtk::Window::builder()
@@ -158,7 +159,7 @@ impl WidgetWindow {
             Backing::Hosted(host) => {
                 host.set_opacity(&cfg.id, cfg.opacity);
                 if let Some(v) = host.view(&cfg.id) {
-                    v.set_mask_look(cfg.mask_opacity, cfg.mask_xf);
+                    v.set_look(cfg);
                 }
                 if moved {
                     host.set_position(&cfg.id, cfg.x, cfg.y);
@@ -167,7 +168,7 @@ impl WidgetWindow {
             Backing::Window(window) => {
                 if let Some(v) = &self.view {
                     v.set_opacity(cfg.opacity);
-                    v.set_mask_look(cfg.mask_opacity, cfg.mask_xf);
+                    v.set_look(cfg);
                 }
                 if env.backend == Backend::X11 {
                     if let Some(xid) = x11::xid_of(window) {

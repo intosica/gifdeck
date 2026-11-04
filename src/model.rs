@@ -262,6 +262,11 @@ pub struct WidgetConfig {
     pub mask: Option<PathBuf>,
     /// How visibly the mask itself is drawn over the widget; 0 = it only clips.
     pub mask_opacity: f64,
+    /// Overall strength of the mask: scales both how hard it clips and how visible it is drawn.
+    pub mask_alpha: f64,
+    /// Playback speed multiplier of the picture / of an animated mask (1.0 = as recorded).
+    pub speed: f64,
+    pub mask_speed: f64,
     pub mask_xf: MaskXf,
     /// Rotation of the whole picture, in degrees.
     pub angle: f64,
@@ -294,6 +299,9 @@ impl Default for WidgetConfig {
             rotation: Rotation::default(),
             mask: None,
             mask_opacity: 0.0,
+            mask_alpha: 1.0,
+            speed: 1.0,
+            mask_speed: 1.0,
             mask_xf: MaskXf::default(),
             angle: 0.0,
             snap_edges: false,

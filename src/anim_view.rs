@@ -18,7 +18,7 @@ use gtk::{glib, graphene, gsk};
 
 use crate::mask_xf::{self, Affine, Handle};
 use crate::media::Anim;
-use crate::model::MaskXf;
+use crate::model::{MaskXf, WidgetConfig};
 
 /// Called with the new transform; `true` once the drag is finished.
 pub type XfCb = Rc<dyn Fn(MaskXf, bool)>;
@@ -47,6 +47,9 @@ mod imp {
         pub mask: RefCell<Option<Rc<Anim>>>,
         pub mask_frame: Cell<usize>,
         pub mask_opacity: Cell<f64>,
+        pub mask_alpha: Cell<f64>,
+        pub speed: Cell<f64>,
+        pub mask_speed: Cell<f64>,
         pub xf: Cell<MaskXf>,
         /// Rotation of the whole picture, in degrees.
         pub angle: Cell<f64>,
@@ -180,17 +183,27 @@ mod imp {
             snapshot.transform(Some(&gsk_of(&view)));
             if let Some(tex) = &mask_tex {
                 snapshot.push_mask(gsk::MaskMode::Alpha);
+                // Overall strength k: clip alpha = (1-k) + k*mask, i.e. a cross-fade from "no clip" to the mask.
+                let k = self.mask_alpha.get();
+                if k < 1.0 {
+                    snapshot.push_cross_fade(k);
+                    snapshot.append_color(&gtk::gdk::RGBA::BLACK, &rect);
+                    snapshot.pop();
+                }
                 snapshot.save();
                 snapshot.transform(Some(&mask_xf));
                 snapshot.append_scaled_texture(tex, gsk::ScalingFilter::Linear, &rect);
                 snapshot.restore();
+                if k < 1.0 {
+                    snapshot.pop();
+                }
                 snapshot.pop();
             }
             snapshot.append_scaled_texture(texture, filter, &rect);
             if let Some(tex) = &mask_tex {
                 snapshot.pop();
                 // The mask itself, drawn over the picture as the user likes it.
-                let opacity = self.mask_opacity.get();
+                let opacity = self.mask_opacity.get() * self.mask_alpha.get();
                 if opacity > 0.0 {
                     snapshot.push_opacity(opacity);
                     let colour = mask_xf::color(&xf);
@@ -289,12 +302,16 @@ impl AnimView {
         self.queue_draw();
     }
 
-    /// How the mask is drawn: `opacity` 0 = only clips; `xf` places and colours it.
-    pub fn set_mask_look(&self, opacity: f64, xf: MaskXf) {
+    /// Live settings: mask drawing (opacity 0 = only clips; `mask_xf` places and colours it,
+    /// `mask_alpha` is its overall strength) and playback speeds. Speeds apply from the next frame.
+    pub fn set_look(&self, cfg: &WidgetConfig) {
         let imp = self.imp();
-        imp.mask_opacity.set(opacity);
+        imp.mask_opacity.set(cfg.mask_opacity);
+        imp.mask_alpha.set(cfg.mask_alpha);
+        imp.speed.set(cfg.speed);
+        imp.mask_speed.set(cfg.mask_speed);
         if imp.grab.get().is_none() {
-            imp.xf.set(xf);
+            imp.xf.set(cfg.mask_xf);
         }
         self.queue_draw();
     }
@@ -368,7 +385,9 @@ fn tick(weak: glib::WeakRef<AnimView>, anim: Rc<Anim>, started: Instant, generat
     let now = Instant::now();
     // Anchoring to `started` avoids drift; if we are far behind (suspend, heavy load)
     // do not fast-forward through a backlog of frames.
-    let due = (started + Duration::from_millis(anim.frames[current].1 as u64)).max(now);
+    let speed = if mask { view.imp().mask_speed.get() } else { view.imp().speed.get() }.max(0.01);
+    let delay = Duration::from_secs_f64(anim.frames[current].1 as f64 / 1000.0 / speed);
+    let due = (started + delay).max(now);
     glib::timeout_add_local_once(due.saturating_duration_since(now), move || {
         let Some(view) = weak.upgrade() else { return };
         if view.imp().generation.get() != generation {

@@ -1,4 +1,8 @@
-# GifDeck
+<div align="center">
+  <img src="data/icons/hicolor/scalable/apps/dev.gifdeck.GifDeck.svg" width="128" height="128" alt="GifDeck logo">
+  <h1>GifDeck</h1>
+</div>
+
 <div align="center">
   <img width="602" height="842" alt="image" src="https://github.com/user-attachments/assets/2dc5a972-f8ba-453b-ae99-d61994716122" />
 </div>
@@ -37,7 +41,7 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 
 - **Drag & drop** files/folders onto the window to import (onto the Masks tab: masks).
 
-- **Masks** tab: GIF, PNG or WebP alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else.
+- **Masks** tab: GIF, PNG or WebP alpha masks (animated GIFs work); apply per widget. Each widget can show its mask at an opacity (0% = clip only) and transform it on screen with Photoshop-style handles (size, stretch, skew, rotation) plus hue / contrast / brightness; the on-screen edit switch turns itself off when you click anything else. **Mask overall opacity** scales both the clip and the drawn mask; **Speed (%)** sets playback speed of the widget and, for animated masks, **Mask speed (%)** of the mask.
 
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 
