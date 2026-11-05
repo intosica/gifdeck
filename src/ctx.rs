@@ -71,6 +71,9 @@ pub struct AppCtx {
 fn store(src: &Path, kind: &str, storage: Storage) -> std::io::Result<PathBuf> {
     let Some(dir) = storage.dir(kind) else { return Ok(src.to_path_buf()) };
     fs::create_dir_all(&dir)?;
+    if src.parent() == Some(dir.as_path()) {
+        return Ok(src.to_path_buf()); // already in the library
+    }
     let name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !src.is_dir() => (s.to_string(), format!(".{e}")),
@@ -366,7 +369,6 @@ impl AppCtx {
                 }
             }
         }
-        self.gc_media();
         self.flush();
         self.refresh(Refresh::Masks);
         self.refresh(Refresh::Widgets);
@@ -374,7 +376,6 @@ impl AppCtx {
 
     pub fn remove_widget(self: &Rc<Self>, id: &str) {
         self.state.borrow_mut().active_preset_mut().widgets.retain(|w| w.id != id);
-        self.gc_media();
         self.flush();
         self.refresh(Refresh::Widgets);
     }
@@ -434,18 +435,21 @@ impl AppCtx {
         self.refresh(Refresh::Positions);
     }
 
-    /// Delete imported files that no preset uses any more.
-    fn gc_media(&self) {
-        let dir = AppState::media_dir();
-        let st = self.state.borrow();
-        let used: Vec<PathBuf> = st.referenced_media().iter().map(|p| p.to_path_buf()).collect();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_file() && !used.iter().any(|u| Path::new(u) == p) {
-                    let _ = fs::remove_file(p);
-                }
+    /// Add every mask file found in the storage `Masks` folder that isn't listed yet.
+    pub fn sync_masks(&self) {
+        let mut st = self.state.borrow_mut();
+        let Some(dir) = st.storage.dir("Masks") else { return };
+        let mut added = false;
+        for p in media::list_folder(&dir) {
+            if !st.masks.iter().any(|m| m.path == p) {
+                let name = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                st.masks.push(Mask { id: model::new_id(), name, path: p });
+                added = true;
             }
+        }
+        drop(st);
+        if added {
+            self.save();
         }
     }
 
@@ -502,7 +506,6 @@ impl AppCtx {
             st.presets.retain(|p| p.id != id);
             st.repair(); // fixes `active` and drops rules that pointed at it
         }
-        self.gc_media();
         self.flush();
         self.refresh(Refresh::All);
     }

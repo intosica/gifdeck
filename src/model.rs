@@ -550,15 +550,6 @@ impl AppState {
         gtk::glib::user_config_dir().join("gifdeck")
     }
 
-    pub fn data_dir() -> PathBuf {
-        gtk::glib::user_data_dir().join("gifdeck")
-    }
-
-    /// Where imported images are copied to.
-    pub fn media_dir() -> PathBuf {
-        Self::data_dir().join("media")
-    }
-
     fn file() -> PathBuf {
         Self::config_dir().join("state.json")
     }
@@ -612,12 +603,6 @@ impl AppState {
     pub fn active_preset_mut(&mut self) -> &mut Preset {
         let idx = self.presets.iter().position(|p| p.id == self.active).unwrap_or(0);
         &mut self.presets[idx]
-    }
-
-    /// Every media file still referenced by some preset.
-    pub fn referenced_media(&self) -> Vec<&Path> {
-        let widgets = self.presets.iter().flat_map(|p| p.widgets.iter().map(|w| w.path.as_path()));
-        widgets.chain(self.masks.iter().map(|m| m.path.as_path())).collect()
     }
 }
 

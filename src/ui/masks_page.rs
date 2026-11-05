@@ -52,6 +52,9 @@ impl MasksPage {
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
                 let dialog = gtk::FileDialog::builder().title("Add alpha masks").modal(true).filters(&filters).default_filter(&filter).build();
+                if let Some(d) = ctx.state.borrow().storage.dir("Masks") {
+                    dialog.set_initial_folder(Some(&gio::File::for_path(d)));
+                }
                 let parent = btn.root().and_downcast::<gtk::Window>();
                 let ctx = ctx.clone();
                 dialog.open_multiple(parent.as_ref(), gio::Cancellable::NONE, move |res| {
@@ -70,6 +73,7 @@ impl MasksPage {
         while let Some(c) = self.list.first_child() {
             self.list.remove(&c);
         }
+        self.ctx.sync_masks();
         let masks = self.ctx.state.borrow().masks.clone();
         for m in masks {
             let row = adw::ActionRow::builder().title(glib::markup_escape_text(&m.name)).subtitle(glib::markup_escape_text(&m.path.to_string_lossy())).build();

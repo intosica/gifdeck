@@ -143,6 +143,9 @@ impl WidgetsPage {
                 let filters = gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);
                 let dialog = gtk::FileDialog::builder().title("Add GIF, PNG or WebP").modal(true).filters(&filters).default_filter(&filter).build();
+                if let Some(d) = ctx.state.borrow().storage.dir("GIFs") {
+                    dialog.set_initial_folder(Some(&gio::File::for_path(d.parent().unwrap_or(&d))));
+                }
                 let parent = btn.root().and_downcast::<gtk::Window>();
                 let ctx = ctx.clone();
                 dialog.open_multiple(parent.as_ref(), gio::Cancellable::NONE, move |res| {
