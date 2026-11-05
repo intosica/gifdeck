@@ -9,7 +9,7 @@
 //! (highest layer priority). The list in the UI is shown in the same order.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 

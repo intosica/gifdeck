@@ -99,6 +99,7 @@ impl MasksPage {
             let (ctx, id) = (self.ctx.clone(), m.id.clone());
             del.connect_clicked(move |_| ctx.remove_mask(&id));
             row.add_suffix(&del);
+            super::rename_on_right_click(&row, &self.ctx, m.path.clone(), m.name.clone());
             self.list.append(&row);
         }
     }

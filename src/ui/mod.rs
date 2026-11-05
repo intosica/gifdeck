@@ -438,3 +438,28 @@ pub fn load_css() {
 
 #[allow(dead_code)]
 fn _assert_types(_: &glib::Value) {}
+
+/// Right-click on `row` (its top `header` pixels) asks for a new file name for `path`.
+pub fn rename_on_right_click(row: &impl IsA<gtk::Widget>, ctx: &Rc<AppCtx>, path: std::path::PathBuf, current: String) {
+    let click = gtk::GestureClick::builder().button(3).build();
+    let (ctx, w) = (ctx.clone(), row.clone().upcast::<gtk::Widget>());
+    click.connect_pressed(move |g, _, _, y| {
+        if y > 64.0 {
+            return; // inside an expanded widget's settings
+        }
+        g.set_state(gtk::EventSequenceState::Claimed);
+        let entry = gtk::Entry::builder().text(&current).activates_default(true).build();
+        let dialog = adw::AlertDialog::builder().heading("Rename file").body(path.to_string_lossy()).extra_child(&entry).build();
+        dialog.add_responses(&[("cancel", "Cancel"), ("ok", "Rename")]);
+        dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("ok"));
+        let (ctx, path) = (ctx.clone(), path.clone());
+        dialog.connect_response(None, move |_, r| {
+            if r == "ok" {
+                ctx.rename_file(&path, &entry.text());
+            }
+        });
+        dialog.present(Some(&w));
+    });
+    row.add_controller(click);
+}

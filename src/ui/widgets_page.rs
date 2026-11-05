@@ -267,6 +267,8 @@ impl WidgetsPage {
             .expanded(self.expanded.borrow().contains(&id))
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("image-x-generic-symbolic"));
+        let stem = if cfg.is_folder() { cfg.path.file_name() } else { cfg.path.file_stem() }.map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        super::rename_on_right_click(&row, &self.ctx, cfg.path.clone(), stem);
         {
             let this = Rc::downgrade(self);
             let id = id.clone();

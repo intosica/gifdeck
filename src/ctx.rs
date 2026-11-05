@@ -435,6 +435,43 @@ impl AppCtx {
         self.refresh(Refresh::Positions);
     }
 
+    /// Rename the file (or folder) `old` on disk to `new_name` (extension kept) and repoint everything that used it.
+    pub fn rename_file(self: &Rc<Self>, old: &Path, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
+            return self.toast("That is not a valid name.");
+        }
+        let ext = old.extension().filter(|_| !old.is_dir()).map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let new = old.with_file_name(format!("{new_name}{ext}"));
+        if new == old {
+            return;
+        }
+        if new.exists() {
+            return self.toast("A file with that name already exists.");
+        }
+        if fs::rename(old, &new).is_err() {
+            return self.toast("Could not rename the file.");
+        }
+        {
+            let mut st = self.state.borrow_mut();
+            for w in st.presets.iter_mut().flat_map(|p| p.widgets.iter_mut()) {
+                if w.path == old {
+                    w.path = new.clone();
+                }
+                if w.mask.as_deref() == Some(old) {
+                    w.mask = Some(new.clone());
+                }
+            }
+            for m in st.masks.iter_mut().filter(|m| m.path == old) {
+                m.path = new.clone();
+                m.name = new.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            }
+        }
+        self.flush();
+        self.refresh(Refresh::Masks);
+        self.refresh(Refresh::Widgets);
+    }
+
     /// Add every mask file found in the storage `Masks` folder that isn't listed yet.
     pub fn sync_masks(&self) {
         let mut st = self.state.borrow_mut();
