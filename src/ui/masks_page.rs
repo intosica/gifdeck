@@ -104,3 +104,76 @@ impl MasksPage {
         }
     }
 }
+
+/// Hovering a mask in `row`'s dropdown shows a small live preview of it beside the list.
+/// `paths[i]` belongs to list entry `i + 1` (entry 0 is "None").
+pub fn hover_preview(row: &adw::ComboRow, paths: Vec<std::path::PathBuf>) {
+    use std::cell::{Cell, RefCell};
+
+    let factory = gtk::SignalListItemFactory::new();
+    let paths = Rc::new(paths);
+    let row_weak = row.downgrade();
+    factory.connect_setup(move |_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        let label = gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build();
+        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        let line = gtk::Box::builder().spacing(8).build();
+        line.append(&label);
+        line.append(&check);
+        item.set_child(Some(&line));
+
+        let token = Rc::new(Cell::new(0u32));
+        let popover: Rc<RefCell<Option<gtk::Popover>>> = Rc::new(RefCell::new(None));
+        let hide = {
+            let (token, popover) = (token.clone(), popover.clone());
+            move || {
+                token.set(token.get() + 1);
+                if let Some(p) = popover.borrow_mut().take() {
+                    p.popdown();
+                    p.unparent();
+                }
+            }
+        };
+
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let (item, paths, token, popover, label, hide) = (item.downgrade(), paths.clone(), token.clone(), popover.clone(), label.downgrade(), hide.clone());
+            motion.connect_enter(move |_, _, _| {
+                hide();
+                let (Some(item), Some(label)) = (item.upgrade(), label.upgrade()) else { return };
+                let Some(path) = (item.position() as usize).checked_sub(1).and_then(|i| paths.get(i)).cloned() else { return };
+                let (mine, token, popover) = (token.get(), token.clone(), popover.clone());
+                glib::spawn_future_local(async move {
+                    let Ok(anim) = media::load(path).await else { return };
+                    if token.get() != mine || !label.is_mapped() {
+                        return; // the pointer moved on
+                    }
+                    let k = (160.0 / anim.width.max(anim.height) as f64).min(1.0);
+                    let view = AnimView::new(anim.clone(), ((anim.width as f64 * k).round() as i32).max(1), ((anim.height as f64 * k).round() as i32).max(1), None);
+                    view.play();
+                    let frame = gtk::Box::builder().margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).css_classes(["gifdeck-preview"]).build();
+                    frame.append(&view);
+                    let pop = gtk::Popover::builder().child(&frame).position(gtk::PositionType::Right).autohide(false).can_target(false).build();
+                    pop.set_parent(&label);
+                    pop.popup();
+                    *popover.borrow_mut() = Some(pop);
+                });
+            });
+        }
+        {
+            let hide = hide.clone();
+            motion.connect_leave(move |_| hide());
+        }
+        line.add_controller(motion);
+        line.connect_unmap(move |_| hide());
+    });
+    factory.connect_bind(move |_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        let Some(line) = item.child().and_downcast::<gtk::Box>() else { return };
+        if let (Some(label), Some(check), Some(name)) = (line.first_child().and_downcast::<gtk::Label>(), line.last_child(), item.item().and_downcast::<gtk::StringObject>()) {
+            label.set_text(&name.string());
+            check.set_visible(row_weak.upgrade().is_some_and(|r| r.selected() == item.position()));
+        }
+    });
+    row.set_list_factory(Some(&factory));
+}

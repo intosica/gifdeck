@@ -47,6 +47,22 @@ compositors with layer-shell, including COSMIC**. Packaged as a **Flatpak**.
 - **Files** setting: use the source path, or keep organized copies in Home or Documents.
 
 - **Single-row schedule** with 24h/12h toggle.
+- **Preset hotkeys**: each preset row has a keyboard button; click it, press a combination (a modifier is required unless it is an F-key; Esc cancels, Backspace clears) and that key switches to the preset. On **X11** the key works system-wide (a passive key grab); on **Wayland** no app can grab keys globally, so it works while GifDeck's window is focused, and any desktop shortcut can run `gifdeck --preset "Name"`, which is forwarded to the running copy.
+- **Schedule time selection** (Settings → Schedule → *Time selection*): number boxes (default), an **analog clock** or a **digital clock**.
+  - *Analog*: press where the window starts, hold and sweep clockwise or counter-clockwise to where it ends (5-minute steps; AM / PM or 00–12 / 12–24 buttons choose the half of the day). Rules that overlap on the same day appear on the dial as a grey ring; when they belong to a different preset for the same application they turn red on both clocks.
+  - *Digital*: click the hours, minutes or AM / PM and drag up or down. The numbers are blue like the rest of the UI and turn red while the rule overlaps another one.
+
+  *(Simulated screenshots, drawn by `docs/screens/make_mockups.py`.)*
+
+  <img width="720" alt="Analog clock: two overlapping rules, both red" src="docs/screens/clocks-analog-overlap.png" />
+  <img width="720" alt="Analog clock: no clash" src="docs/screens/clocks-analog-free.png" />
+  <img width="720" alt="Digital clock: blue and red times" src="docs/screens/clocks-digital.png" />
+
+- **When a scheduled preset ends** and no other rule follows (Settings → Schedule): *leave it on*, *switch to a random preset* or *turn all widgets off* (they come back with the next scheduled preset).
+- **When you switch preset during a schedule**: *free* (the swap stays until the schedule moves on), *timer* (the schedule takes over again after N minutes) or *lock* (the scheduled preset cannot be swapped away).
+- **Global or per preset**: turn on *Choose these two per preset* and every preset row gets a gear with its own end / switch behaviour (or *Use the global setting*).
+- **Mask preview**: hovering a mask in a widget's *Alpha mask* dropdown shows a small live preview beside the list.
+- **Renaming a preset** now ends when you click anywhere else.
 <img width="644" height="842" alt="image" src="https://github.com/user-attachments/assets/a3218219-7fc1-4bf6-a6b8-59fa7e236f9e" />
 
 - **Application blacklist** (Settings) and per-widget *only when app open* / *minimize when app open*.

@@ -12,3 +12,17 @@ window.gifdeck-widget.background {
   outline-offset: -2px;
   border-radius: 6px;
 }
+
+/* Digital clock: blue like the numbers elsewhere in the UI; red while the rule clashes with another. */
+.gifdeck-digital {
+  color: @accent_color;
+  font-weight: bold;
+  font-feature-settings: "tnum";
+  padding: 2px 3px;
+}
+.gifdeck-digital:hover { background: alpha(@accent_bg_color, 0.18); border-radius: 6px; }
+.gifdeck-invalid .gifdeck-digital { color: @error_color; }
+.gifdeck-invalid .gifdeck-digital:hover { background: alpha(@error_color, 0.15); }
+
+/* Mask preview beside the mask dropdown. */
+.gifdeck-preview { background: alpha(currentColor, 0.1); border-radius: 6px; }

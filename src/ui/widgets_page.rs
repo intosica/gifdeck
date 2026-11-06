@@ -128,7 +128,7 @@ impl WidgetsPage {
                 }
                 let id = ctx.state.borrow().presets.get(row.selected() as usize).map(|p| p.id.clone());
                 if let Some(id) = id {
-                    ctx.activate_preset(&id);
+                    ctx.user_activate_preset(&id);
                 }
             });
         }
@@ -373,6 +373,7 @@ impl WidgetsPage {
         let mask_names: Vec<&str> = mask_names.iter().map(String::as_str).collect();
         let mask_sel = cfg.mask.as_ref().and_then(|p| masks.iter().position(|m| &m.path == p)).map(|i| i as u32 + 1).unwrap_or(0);
         let mask = adw::ComboRow::builder().title("Alpha mask").subtitle("Clip the widget to a saved shape (Masks tab)").model(&gtk::StringList::new(&mask_names)).selected(mask_sel).build();
+        super::masks_page::hover_preview(&mask, masks.iter().map(|m| m.path.clone()).collect());
 
         // Mask look + on-screen transform; only useful with a mask chosen.
         let edit_sw = adw::SwitchRow::builder().title("Transform mask on screen").subtitle("Drag handles on the widget; turns off when you click anything else").active(self.ctx.edit_mask.borrow().as_deref() == Some(id.as_str())).build();

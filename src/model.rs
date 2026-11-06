@@ -351,6 +351,65 @@ impl WidgetConfig {
     }
 }
 
+/// A small setting with a fixed list of choices (label + index helpers for dropdowns).
+macro_rules! choice {
+    ($(#[$m:meta])* $name:ident { $($(#[$vm:meta])* $v:ident => $label:expr),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+        pub enum $name { $($(#[$vm])* $v),+ }
+
+        impl $name {
+            pub const ALL: &[$name] = &[$($name::$v),+];
+
+            pub fn label(self) -> &'static str {
+                match self { $($name::$v => $label),+ }
+            }
+
+            pub fn from_index(i: u32) -> $name {
+                $name::ALL.get(i as usize).copied().unwrap_or_default()
+            }
+
+            pub fn index(self) -> u32 {
+                $name::ALL.iter().position(|m| *m == self).unwrap_or(0) as u32
+            }
+
+            pub fn labels() -> Vec<&'static str> {
+                $name::ALL.iter().map(|m| m.label()).collect()
+            }
+        }
+    };
+}
+
+choice! {
+    /// What happens when a scheduled preset ends and no rule follows it.
+    EndAction {
+        #[default]
+        LeaveOn => "Leave the preset on",
+        Random => "Switch to a random preset",
+        TurnOff => "Turn all widgets off",
+    }
+}
+
+choice! {
+    /// What happens when the user swaps presets while a schedule is in force.
+    SwapMode {
+        #[default]
+        Free => "Free: the swap stays until the schedule moves on",
+        Timer => "Timer: go back to the schedule after a while",
+        Lock => "Lock: the schedule cannot be swapped away",
+    }
+}
+
+choice! {
+    /// How times are entered in a schedule rule.
+    TimePicker {
+        #[default]
+        Spin => "Number boxes",
+        Analog => "Analog clock (sweep an arc)",
+        Digital => "Digital clock (drag the numbers)",
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Preset {
@@ -358,11 +417,16 @@ pub struct Preset {
     pub name: String,
     /// Front-most first.
     pub widgets: Vec<WidgetConfig>,
+    /// GTK accelerator ("<Ctrl><Alt>1") that switches to this preset.
+    pub hotkey: Option<String>,
+    /// Per-preset overrides (only used when `AppState::per_preset_behaviour` is on); `None` = the global choice.
+    pub end_action: Option<EndAction>,
+    pub swap_mode: Option<SwapMode>,
 }
 
 impl Default for Preset {
     fn default() -> Self {
-        Preset { id: new_id(), name: "Preset".into(), widgets: Vec::new() }
+        Preset { id: new_id(), name: "Preset".into(), widgets: Vec::new(), hotkey: None, end_action: None, swap_mode: None }
     }
 }
 
@@ -424,7 +488,12 @@ impl Rule {
 
     /// Do the two rules pick different presets in some shared day/time slot of one scope?
     pub fn conflicts(&self, o: &Rule) -> bool {
-        self.preset != o.preset && self.same_scope(o) && (0..7).any(|d| (0..1440u16).any(|m| self.matches(d, m) && o.matches(d, m)))
+        self.preset != o.preset && self.same_scope(o) && self.overlaps(o)
+    }
+
+    /// Are the two rules in force at the same time on some day (whatever preset or application)?
+    pub fn overlaps(&self, o: &Rule) -> bool {
+        (0..7).any(|d| (0..1440u16).any(|m| self.matches(d, m) && o.matches(d, m)))
     }
 
     /// `day`: 0 = Monday … 6 = Sunday. `minute`: minutes since midnight.
@@ -444,7 +513,6 @@ impl Rule {
 }
 
 /// "16:05" or "4:05 PM".
-#[allow(dead_code)] // formatted clock strings are only exercised by the unit tests for now
 pub fn fmt_time(m: u16, h24: bool) -> String {
     let (h, min) = ((m / 60) % 24, m % 60);
     if h24 {
@@ -523,6 +591,15 @@ pub struct AppState {
     pub masks: Vec<Mask>,
     /// X11 master switch: widgets belong to a workspace instead of showing on all of them.
     pub per_workspace: bool,
+    /// How schedule times are entered.
+    pub time_picker: TimePicker,
+    /// When a scheduled preset ends and nothing follows.
+    pub end_action: EndAction,
+    /// When the user swaps presets during a schedule, and the timer length for `SwapMode::Timer`.
+    pub swap_mode: SwapMode,
+    pub swap_minutes: u32,
+    /// The two choices above are set per preset (falling back to the global one) instead of globally.
+    pub per_preset_behaviour: bool,
 }
 
 impl Default for AppState {
@@ -541,6 +618,11 @@ impl Default for AppState {
             storage: Storage::default(),
             masks: Vec::new(),
             per_workspace: false,
+            time_picker: TimePicker::default(),
+            end_action: EndAction::default(),
+            swap_mode: SwapMode::default(),
+            swap_minutes: 30,
+            per_preset_behaviour: false,
         }
     }
 }
@@ -594,6 +676,16 @@ impl AppState {
 
     pub fn preset(&self, id: &str) -> Option<&Preset> {
         self.presets.iter().find(|p| p.id == id)
+    }
+
+    /// What to do when the schedule of preset `id` ends with nothing after it.
+    pub fn end_action_for(&self, id: &str) -> EndAction {
+        self.preset(id).and_then(|p| p.end_action).filter(|_| self.per_preset_behaviour).unwrap_or(self.end_action)
+    }
+
+    /// What to do when the user swaps away from preset `id` during its schedule.
+    pub fn swap_mode_for(&self, id: &str) -> SwapMode {
+        self.preset(id).and_then(|p| p.swap_mode).filter(|_| self.per_preset_behaviour).unwrap_or(self.swap_mode)
     }
 
     pub fn active_preset(&self) -> &Preset {
@@ -853,5 +945,28 @@ mod tests {
         assert_eq!(fmt_time(16 * 60 + 5, true), "16:05");
         assert_eq!(fmt_time(16 * 60 + 5, false), "4:05 PM");
         assert_eq!(fmt_time(0, false), "12:00 AM");
+    }
+
+    #[test]
+    fn behaviour_is_global_or_per_preset() {
+        let mut st = AppState { end_action: EndAction::TurnOff, swap_mode: SwapMode::Lock, ..Default::default() };
+        let id = st.presets[0].id.clone();
+        st.presets[0].end_action = Some(EndAction::Random);
+        st.presets[0].swap_mode = Some(SwapMode::Timer);
+        assert_eq!((st.end_action_for(&id), st.swap_mode_for(&id)), (EndAction::TurnOff, SwapMode::Lock)); // overrides ignored
+        st.per_preset_behaviour = true;
+        assert_eq!((st.end_action_for(&id), st.swap_mode_for(&id)), (EndAction::Random, SwapMode::Timer));
+        st.presets[0].end_action = None;
+        assert_eq!(st.end_action_for(&id), EndAction::TurnOff); // falls back to the global choice
+    }
+
+    #[test]
+    fn overlap_ignores_presets_but_conflict_does_not() {
+        let a = with_preset(rule(&[0], 600, 700), "a");
+        let b = with_preset(rule(&[0], 650, 800), "a");
+        let c = with_preset(rule(&[1], 650, 800), "b");
+        assert!(a.overlaps(&b) && !a.conflicts(&b)); // same preset: harmless
+        assert!(!a.overlaps(&c)); // different day
+        assert!(a.conflicts(&with_preset(b.clone(), "b")));
     }
 }

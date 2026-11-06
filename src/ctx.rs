@@ -15,7 +15,8 @@ use gtk::{gio, glib};
 use crate::env::Env;
 use crate::manager::Manager;
 use crate::media;
-use crate::model::{self, AppRef, AppState, Mask, MaskXf, Preset, Rule, Storage, Win, WidgetConfig};
+use crate::hotkeys::Hotkeys;
+use crate::model::{self, AppRef, AppState, EndAction, Mask, MaskXf, Preset, Rule, Storage, SwapMode, TimePicker, Win, WidgetConfig};
 
 /// What the UI should redraw.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,6 +35,8 @@ pub enum Refresh {
     MaskEdit,
     /// The rule list was restructured.
     Schedule,
+    /// The preset list itself changed (hotkeys, per-preset behaviour).
+    PresetList,
     /// Master switch changed.
     Enabled,
     /// Blacklist changed.
@@ -65,6 +68,12 @@ pub struct AppCtx {
     wins: RefCell<Vec<Win>>,
     /// Widget whose mask is being transformed on screen.
     pub edit_mask: RefCell<Option<String>>,
+    /// Pending "go back to the schedule" after a manual swap (`SwapMode::Timer`).
+    swap_timer: RefCell<Option<glib::SourceId>>,
+    /// The schedule's end action turned the widgets off, so the next scheduled preset turns them back on.
+    off_by_schedule: std::cell::Cell<bool>,
+    /// X11 global hotkeys.
+    hotkeys: RefCell<Option<Rc<Hotkeys>>>,
 }
 
 /// Put `src` (file or folder) where `storage` says; returns the path the widget should use.
@@ -144,6 +153,9 @@ impl AppCtx {
                 app_return: RefCell::new(None),
                 seen_workspace: std::cell::Cell::new(None),
                 wins: RefCell::new(Vec::new()),
+                swap_timer: RefCell::new(None),
+                off_by_schedule: std::cell::Cell::new(false),
+                hotkeys: RefCell::new(None),
             }
         })
     }
@@ -211,6 +223,9 @@ impl AppCtx {
     }
 
     pub fn set_widgets_enabled(self: &Rc<Self>, on: bool) {
+        if on {
+            self.off_by_schedule.set(false);
+        }
         if self.state.borrow().widgets_enabled != on {
             self.state.borrow_mut().widgets_enabled = on;
             self.flush();
@@ -240,6 +255,42 @@ impl AppCtx {
         self.state.borrow_mut().time_24h = on;
         self.save();
         self.refresh(Refresh::Schedule);
+    }
+
+    pub fn set_time_picker(self: &Rc<Self>, p: TimePicker) {
+        self.state.borrow_mut().time_picker = p;
+        self.save();
+        self.refresh(Refresh::Schedule);
+    }
+
+    pub fn set_end_action(&self, a: EndAction) {
+        self.state.borrow_mut().end_action = a;
+        self.save();
+    }
+
+    pub fn set_swap_mode(self: &Rc<Self>, m: SwapMode) {
+        self.state.borrow_mut().swap_mode = m;
+        self.save();
+        self.cancel_swap_timer();
+    }
+
+    pub fn set_swap_minutes(&self, m: u32) {
+        self.state.borrow_mut().swap_minutes = m.max(1);
+        self.save();
+    }
+
+    pub fn set_per_preset_behaviour(&self, on: bool) {
+        self.state.borrow_mut().per_preset_behaviour = on;
+        self.save();
+        self.refresh(Refresh::PresetList);
+    }
+
+    /// Edit one preset's own settings (hotkey, behaviour overrides) and save.
+    pub fn edit_preset(&self, id: &str, f: impl FnOnce(&mut Preset)) {
+        if let Some(p) = self.state.borrow_mut().presets.iter_mut().find(|p| p.id == id) {
+            f(p);
+        }
+        self.save();
     }
 
     /// X11 master switch: widgets belong to a workspace (or to all).
@@ -504,6 +555,87 @@ impl AppCtx {
         self.refresh(Refresh::All);
     }
 
+    /// The user (radio button, dropdown, hotkey, command line) asks for a preset. Unlike
+    /// `activate_preset` this honours the swap behaviour while a schedule is in force.
+    pub fn user_activate_preset(self: &Rc<Self>, id: &str) {
+        let scheduled = {
+            let st = self.state.borrow();
+            if !st.schedule_enabled || st.active == id || st.preset(id).is_none() {
+                None
+            } else {
+                let (day, minute) = model::now_slot();
+                model::evaluate(&st.rules, &self.wins.borrow(), day, minute).map(|r| r.preset.clone())
+            }
+        };
+        if let Some(sched) = scheduled {
+            if sched == id {
+                self.cancel_swap_timer(); // back on the schedule's choice
+            } else {
+                let (mode, minutes) = {
+                    let st = self.state.borrow();
+                    (st.swap_mode_for(&sched), st.swap_minutes)
+                };
+                match mode {
+                    SwapMode::Lock => {
+                        self.toast("The schedule is locked: this preset cannot be swapped in right now.");
+                        self.refresh(Refresh::All); // put the radio buttons back
+                        return;
+                    }
+                    SwapMode::Timer => self.start_swap_timer(minutes),
+                    SwapMode::Free => {}
+                }
+            }
+        }
+        self.activate_preset(id);
+    }
+
+    fn cancel_swap_timer(&self) {
+        if let Some(t) = self.swap_timer.borrow_mut().take() {
+            t.remove();
+        }
+    }
+
+    fn start_swap_timer(self: &Rc<Self>, minutes: u32) {
+        self.cancel_swap_timer();
+        let this = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(Duration::from_secs(u64::from(minutes) * 60), move || {
+            if let Some(ctx) = this.upgrade() {
+                ctx.swap_timer.borrow_mut().take();
+                *ctx.last_scheduled.borrow_mut() = None; // re-apply whatever the schedule says now
+                ctx.tick_schedule();
+            }
+        });
+        *self.swap_timer.borrow_mut() = Some(id);
+    }
+
+    /// The scheduled preset `ended` has run out and no rule follows it.
+    fn schedule_ended(self: &Rc<Self>, ended: &str) {
+        let action = self.state.borrow().end_action_for(ended);
+        match action {
+            EndAction::LeaveOn => {}
+            EndAction::TurnOff => {
+                if self.state.borrow().widgets_enabled {
+                    self.set_widgets_enabled(false);
+                    self.off_by_schedule.set(true);
+                }
+            }
+            EndAction::Random => {
+                let pick = {
+                    let st = self.state.borrow();
+                    let others = |skip_ended: bool| st.presets.iter().filter(|p| p.id != st.active && !(skip_ended && p.id == ended)).map(|p| p.id.clone()).collect::<Vec<_>>();
+                    let mut c = others(true);
+                    if c.is_empty() {
+                        c = others(false);
+                    }
+                    (!c.is_empty()).then(|| c[glib::random_int_range(0, c.len() as i32) as usize].clone())
+                };
+                if let Some(id) = pick {
+                    self.activate_preset(&id);
+                }
+            }
+        }
+    }
+
     pub fn new_preset(self: &Rc<Self>) {
         let n = self.state.borrow().presets.len() + 1;
         let preset = Preset { name: format!("Preset {n}"), ..Default::default() };
@@ -520,6 +652,7 @@ impl AppCtx {
                 let mut c = p.clone();
                 c.id = model::new_id();
                 c.name = format!("{} copy", p.name);
+                c.hotkey = None; // a key can only switch to one preset
                 for w in &mut c.widgets {
                     w.id = model::new_id();
                 }
@@ -553,6 +686,73 @@ impl AppCtx {
         }
         self.save();
         self.refresh(Refresh::Names);
+    }
+
+    // ---------------------------------------------------------------- hotkeys
+
+    /// X11: start listening for the global keys. Elsewhere hotkeys are app accelerators.
+    pub fn init_hotkeys(self: &Rc<Self>) {
+        if self.env.backend != crate::env::Backend::X11 {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        let hk = Hotkeys::new(move |id| {
+            if let Some(ctx) = this.upgrade() {
+                ctx.user_activate_preset(id);
+            }
+        });
+        *self.hotkeys.borrow_mut() = hk;
+    }
+
+    /// Make the grabs / accelerators match the presets. Keys that cannot be had are cleared.
+    pub fn sync_hotkeys(self: &Rc<Self>) {
+        let wanted: Vec<(String, String)> = self.state.borrow().presets.iter().filter_map(|p| p.hotkey.clone().map(|h| (p.id.clone(), h))).collect();
+        let hk = self.hotkeys.borrow().clone();
+        match hk {
+            Some(hk) => {
+                let failed = hk.set(&wanted);
+                if !failed.is_empty() {
+                    for id in &failed {
+                        self.edit_preset(id, |p| p.hotkey = None);
+                    }
+                    self.toast("That key is taken by another program, so it cannot be a hotkey.");
+                    self.refresh(Refresh::PresetList);
+                }
+            }
+            None => {
+                for p in &self.state.borrow().presets {
+                    let accel: Vec<&str> = p.hotkey.as_deref().into_iter().collect();
+                    self.app.set_accels_for_action(&format!("app.activate-preset::{}", p.id), &accel);
+                }
+            }
+        }
+    }
+
+    /// Give (or clear) a preset's hotkey. A key already used by another preset is refused.
+    pub fn set_hotkey(self: &Rc<Self>, id: &str, accel: Option<String>) {
+        if let Some(a) = &accel {
+            let taken = self.state.borrow().presets.iter().find(|p| p.id != id && p.hotkey.as_deref() == Some(a.as_str())).map(|p| p.name.clone());
+            if let Some(name) = taken {
+                self.toast(&format!("That key already switches to “{name}”."));
+                self.refresh(Refresh::PresetList);
+                return;
+            }
+        }
+        self.edit_preset(id, |p| p.hotkey = accel);
+        self.sync_hotkeys();
+        self.refresh(Refresh::PresetList);
+    }
+
+    /// `name` is a preset id or (case-insensitively) its name.
+    pub fn activate_by_name(self: &Rc<Self>, name: &str) {
+        let id = {
+            let st = self.state.borrow();
+            st.presets.iter().find(|p| p.id == name).or_else(|| st.presets.iter().find(|p| p.name.eq_ignore_ascii_case(name))).map(|p| p.id.clone())
+        };
+        match id {
+            Some(id) => self.user_activate_preset(&id),
+            None => self.toast(&format!("No preset called “{name}”.")),
+        }
     }
 
     // ---------------------------------------------------------------- schedule
@@ -629,9 +829,13 @@ impl AppCtx {
         let target_id = target.as_ref().map(|t| t.0.clone());
         let changed = self.last_scheduled.borrow().as_ref() != Some(&target_id);
         if changed {
-            *self.last_scheduled.borrow_mut() = Some(target_id.clone());
+            let prev = self.last_scheduled.borrow_mut().replace(target_id.clone());
+            self.cancel_swap_timer(); // the schedule moved on by itself
             match target {
                 Some((id, gated)) => {
+                    if self.off_by_schedule.replace(false) {
+                        self.set_widgets_enabled(true);
+                    }
                     if gated && self.app_return.borrow().is_none() {
                         *self.app_return.borrow_mut() = Some(self.state.borrow().active.clone());
                     }
@@ -642,6 +846,8 @@ impl AppCtx {
                     let back = self.app_return.borrow_mut().take();
                     if let Some(id) = back {
                         self.activate_preset(&id);
+                    } else if let Some(Some(ended)) = prev {
+                        self.schedule_ended(&ended);
                     }
                 }
             }

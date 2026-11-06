@@ -4,10 +4,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib};
 
 use crate::ctx::AppCtx;
-use crate::model::{self, AppRef, Problem, Rule, DAY_NAMES};
+use crate::model::{self, AppRef, EndAction, Preset, Problem, Rule, SwapMode, TimePicker, DAY_NAMES};
 
 use super::app_picker;
 
@@ -23,6 +23,8 @@ pub struct PresetsPage {
     marks: RefCell<Vec<RuleMarks>>,
     /// Explains the red outlines.
     problem_note: gtk::Label,
+    /// Analog clocks of the rule rows: they show other rules too, so they redraw when any rule changes.
+    clocks: RefCell<Vec<gtk::DrawingArea>>,
 }
 
 struct RuleMarks {
@@ -62,6 +64,113 @@ fn app_button_child(app: &Option<AppRef>) -> gtk::Box {
 
 fn flat_button(icon: &str, tip: &str) -> gtk::Button {
     gtk::Button::builder().icon_name(icon).tooltip_text(tip).valign(gtk::Align::Center).css_classes(["flat"]).build()
+}
+
+/// Click, then press the key combination that should switch to this preset
+/// (Esc cancels, Backspace / Delete clears). A modifier is required unless it is an F-key.
+fn hotkey_button(ctx: &Rc<AppCtx>, id: &str, current: Option<&str>) -> gtk::Button {
+    let btn = flat_button("input-keyboard-symbolic", "Set a hotkey that switches to this preset");
+    let show = |b: &gtk::Button, accel: Option<&str>| match accel.and_then(gtk::accelerator_parse) {
+        Some((key, mods)) => {
+            b.set_label(&gtk::accelerator_get_label(key, mods));
+            b.set_tooltip_text(Some("Hotkey for this preset. Click to change."));
+        }
+        None => {
+            b.set_icon_name("input-keyboard-symbolic");
+            b.set_tooltip_text(Some("Set a hotkey that switches to this preset"));
+        }
+    };
+    show(&btn, current);
+    let listening = Rc::new(Cell::new(false));
+    {
+        let listening = listening.clone();
+        btn.connect_clicked(move |b| {
+            listening.set(true);
+            b.set_label("Press keys…");
+            b.set_tooltip_text(Some("Esc cancels, Backspace clears"));
+        });
+    }
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let (ctx, id, listening, btn2, old) = (ctx.clone(), id.to_string(), listening.clone(), btn.clone(), current.map(String::from));
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if !listening.get() {
+                return glib::Propagation::Proceed;
+            }
+            let code = glib::translate::IntoGlib::into_glib(key);
+            if (0xffe1..=0xffee).contains(&code) {
+                return glib::Propagation::Stop; // a modifier on its own: keep waiting
+            }
+            let mods = state & gtk::accelerator_get_default_mod_mask();
+            let f_key = (0xffbe..=0xffc9).contains(&code);
+            if key == gdk::Key::Escape {
+                listening.set(false);
+                show(&btn2, old.as_deref());
+            } else if key == gdk::Key::BackSpace || key == gdk::Key::Delete {
+                listening.set(false);
+                ctx.set_hotkey(&id, None);
+            } else if mods.is_empty() && !f_key {
+                ctx.toast("Hold Ctrl, Alt, Shift or Super with the key (only F-keys work alone).");
+            } else {
+                listening.set(false);
+                ctx.set_hotkey(&id, Some(gtk::accelerator_name(key.to_lower(), mods).to_string()));
+            }
+            glib::Propagation::Stop
+        });
+    }
+    btn.add_controller(keys);
+    let focus = gtk::EventControllerFocus::new();
+    {
+        let (listening, btn2, old) = (listening, btn.clone(), current.map(String::from));
+        focus.connect_leave(move |_| {
+            if listening.replace(false) {
+                show(&btn2, old.as_deref());
+            }
+        });
+    }
+    btn.add_controller(focus);
+    btn
+}
+
+/// Gear with this preset's own end / swap behaviour; only shown while the setting is per preset.
+fn behaviour_button(ctx: &Rc<AppCtx>, p: &Preset) -> gtk::MenuButton {
+    fn dropdown(labels: Vec<&str>, current: Option<u32>) -> gtk::DropDown {
+        let mut all = vec!["Use the global setting"];
+        all.extend(labels);
+        let d = gtk::DropDown::from_strings(&all);
+        d.set_selected(current.map_or(0, |i| i + 1));
+        d
+    }
+    let end = dropdown(EndAction::labels(), p.end_action.map(EndAction::index));
+    let swap = dropdown(SwapMode::labels(), p.swap_mode.map(SwapMode::index));
+    {
+        let (ctx, id) = (ctx.clone(), p.id.clone());
+        end.connect_selected_notify(move |d| {
+            let v = d.selected().checked_sub(1).map(EndAction::from_index);
+            ctx.edit_preset(&id, |p| p.end_action = v);
+        });
+    }
+    {
+        let (ctx, id) = (ctx.clone(), p.id.clone());
+        swap.connect_selected_notify(move |d| {
+            let v = d.selected().checked_sub(1).map(SwapMode::from_index);
+            ctx.edit_preset(&id, |p| p.swap_mode = v);
+        });
+    }
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(10).margin_bottom(10).margin_start(10).margin_end(10).build();
+    for (title, d) in [("When my schedule ends", &end), ("When I switch away during my schedule", &swap)] {
+        body.append(&gtk::Label::builder().label(title).xalign(0.0).css_classes(["heading"]).build());
+        body.append(d);
+    }
+    gtk::MenuButton::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("What this preset does when its schedule ends or is swapped away")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .popover(&gtk::Popover::builder().child(&body).build())
+        .visible(ctx.state.borrow().per_preset_behaviour)
+        .build()
 }
 
 fn list_box() -> gtk::ListBox {
@@ -137,6 +246,7 @@ impl PresetsPage {
             updating: Rc::new(Cell::new(false)),
             marks: RefCell::new(Vec::new()),
             problem_note,
+            clocks: RefCell::new(Vec::new()),
         });
 
         {
@@ -184,6 +294,8 @@ impl PresetsPage {
             let dup = flat_button("edit-copy-symbolic", "Duplicate preset");
             let del = flat_button("user-trash-symbolic", "Delete preset");
             del.set_sensitive(!only_one);
+            row.add_suffix(&hotkey_button(&self.ctx, &p.id, p.hotkey.as_deref()));
+            row.add_suffix(&behaviour_button(&self.ctx, p));
             row.add_suffix(&dup);
             row.add_suffix(&del);
 
@@ -191,7 +303,7 @@ impl PresetsPage {
                 let (ctx, id, updating) = (self.ctx.clone(), p.id.clone(), self.updating.clone());
                 radio.connect_toggled(move |r| {
                     if r.is_active() && !updating.get() {
-                        ctx.activate_preset(&id);
+                        ctx.user_activate_preset(&id);
                     }
                 });
             }
@@ -257,6 +369,9 @@ impl PresetsPage {
             }
         }
         self.problem_note.set_visible(problems.iter().any(Option::is_some));
+        for c in self.clocks.borrow().iter() {
+            c.queue_draw();
+        }
     }
 
     pub fn rebuild_rules(self: &Rc<Self>) {
@@ -268,6 +383,7 @@ impl PresetsPage {
         };
         let total = rules.len();
         self.marks.borrow_mut().clear();
+        self.clocks.borrow_mut().clear();
         for (i, rule) in rules.iter().enumerate() {
             self.rule_list.append(&self.build_rule(rule, i, total, &presets));
         }
@@ -283,7 +399,7 @@ impl PresetsPage {
         let wrap = super::wrap_row(8);
         let edit = {
             let (ctx, id) = (ctx.clone(), id.clone());
-            Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| ctx.edit_rule(&id, f))
+            Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| ctx.edit_rule(&id, f)) as super::clock::Edit
         };
         let center = |w: &gtk::Widget| w.set_valign(gtk::Align::Center);
 
@@ -326,14 +442,22 @@ impl PresetsPage {
         // time window
         let all_day = gtk::CheckButton::builder().label("All day").active(rule.all_day).valign(gtk::Align::Center).build();
         let window = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).visible(!rule.all_day).build();
-        {
-            let edit = edit.clone();
-            window.append(&super::time_box(rule.start, h24, move |m| edit(Box::new(move |r| r.start = m))));
-        }
-        window.append(&gtk::Label::new(Some("–")));
-        {
-            let edit = edit.clone();
-            window.append(&super::time_box(rule.end, h24, move |m| edit(Box::new(move |r| r.end = m))));
+        match self.ctx.state.borrow().time_picker {
+            TimePicker::Analog => {
+                let (clock, dial) = super::clock::analog(&ctx, rule, h24, edit.clone());
+                self.clocks.borrow_mut().push(dial);
+                window.append(&clock);
+            }
+            picker => {
+                let pick = |m: u16, on_change: Box<dyn Fn(u16)>| -> gtk::Box {
+                    if picker == TimePicker::Digital { super::clock::digital(m, h24, on_change) } else { super::time_box(m, h24, on_change) }
+                };
+                let e = edit.clone();
+                window.append(&pick(rule.start, Box::new(move |m| e(Box::new(move |r| r.start = m)))));
+                window.append(&gtk::Label::new(Some("–")));
+                let e = edit.clone();
+                window.append(&pick(rule.end, Box::new(move |m| e(Box::new(move |r| r.end = m)))));
+            }
         }
         window.set_tooltip_text(Some("An end earlier than the start means after midnight"));
         {

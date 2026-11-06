@@ -1,6 +1,7 @@
 //! The compact manager window.
 
 mod app_picker;
+mod clock;
 mod masks_page;
 mod presets_page;
 mod widgets_page;
@@ -13,7 +14,7 @@ use gtk::{gio, glib};
 
 use crate::autostart;
 use crate::ctx::{AppCtx, Refresh};
-use crate::model::Storage;
+use crate::model::{EndAction, Storage, SwapMode, TimePicker};
 use masks_page::MasksPage;
 use presets_page::PresetsPage;
 use widgets_page::WidgetsPage;
@@ -104,7 +105,8 @@ impl Ui {
             .default_height(720)
             .content(&toasts)
             .build();
-        // Mask editing ends as soon as the user clicks anything but the mask controls.
+        // Mask editing ends as soon as the user clicks anything but the mask controls;
+        // a text field (preset rename, number box) lets go of the keyboard when you click elsewhere.
         let click = gtk::GestureClick::new();
         click.set_propagation_phase(gtk::PropagationPhase::Capture);
         click.set_button(0);
@@ -112,10 +114,19 @@ impl Ui {
             let ctx = ctx.clone();
             let win = window.downgrade();
             click.connect_pressed(move |_, _, x, y| {
+                let Some(win) = win.upgrade() else { return };
+                let editing = gtk::prelude::GtkWindowExt::focus(&win).and_then(|f| {
+                    std::iter::successors(Some(f), |w| w.parent()).filter(|w| w.is::<gtk::Editable>()).last()
+                });
+                if let Some(editing) = editing {
+                    let inside = std::iter::successors(win.pick(x, y, gtk::PickFlags::DEFAULT), |w| w.parent()).any(|w| w == editing);
+                    if !inside {
+                        gtk::prelude::GtkWindowExt::set_focus(&win, None::<&gtk::Widget>);
+                    }
+                }
                 if ctx.edit_mask.borrow().is_none() {
                     return;
                 }
-                let Some(win) = win.upgrade() else { return };
                 let mut w = win.pick(x, y, gtk::PickFlags::DEFAULT);
                 while let Some(cur) = w {
                     if cur.has_css_class(widgets_page::XF_KEEP) {
@@ -152,6 +163,7 @@ impl Ui {
                 self.presets.rebuild_rules();
             }
             Refresh::Schedule => self.presets.rebuild_rules(),
+            Refresh::PresetList => self.presets.rebuild_presets(),
             Refresh::Masks => {
                 self.masks.rebuild();
                 self.widgets.rebuild();
@@ -287,6 +299,56 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     }
     startup.add(&autostart_row);
     page.add(&startup);
+
+    // ---- schedule
+    let (ts, ds) = {
+        let st = ctx.state.borrow();
+        ((st.time_picker, st.end_action, st.swap_mode, st.per_preset_behaviour), st.swap_minutes)
+    };
+    let group = adw::PreferencesGroup::builder().title("Schedule").description("How preset schedules are entered, and what happens at their edges.").build();
+    let combo = |title: &str, subtitle: &str, labels: Vec<&str>, selected: u32| {
+        adw::ComboRow::builder().title(title).subtitle(subtitle).model(&gtk::StringList::new(&labels)).selected(selected).build()
+    };
+    let picker = combo("Time selection", "Spin boxes, an analog clock you sweep with the mouse, or a digital clock you drag up and down.", TimePicker::labels(), ts.0.index());
+    {
+        let ctx = ctx.clone();
+        picker.connect_selected_notify(move |r| ctx.set_time_picker(TimePicker::from_index(r.selected())));
+    }
+    let end = combo("When a scheduled preset ends", "Nothing is scheduled after it.", EndAction::labels(), ts.1.index());
+    {
+        let ctx = ctx.clone();
+        end.connect_selected_notify(move |r| ctx.set_end_action(EndAction::from_index(r.selected())));
+    }
+    let swap = combo("When I switch preset during a schedule", "Applies to the radio buttons, the dropdown and hotkeys.", SwapMode::labels(), ts.2.index());
+    let minutes = adw::SpinRow::builder().title("Timer length").subtitle("Minutes before the schedule takes over again").adjustment(&gtk::Adjustment::new(f64::from(ds), 1.0, 1440.0, 5.0, 30.0, 0.0)).build();
+    minutes.set_visible(ts.2 == SwapMode::Timer);
+    {
+        let (ctx, minutes) = (ctx.clone(), minutes.clone());
+        swap.connect_selected_notify(move |r| {
+            let m = SwapMode::from_index(r.selected());
+            minutes.set_visible(m == SwapMode::Timer);
+            ctx.set_swap_mode(m);
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        minutes.connect_value_notify(move |r| ctx.set_swap_minutes(r.value() as u32));
+    }
+    let per_preset = adw::SwitchRow::builder()
+        .title("Choose these two per preset")
+        .subtitle("Each preset gets its own end and switch behaviour (the gear in its row). The settings above are the default for presets left on global.")
+        .active(ts.3)
+        .build();
+    {
+        let ctx = ctx.clone();
+        per_preset.connect_active_notify(move |r| ctx.set_per_preset_behaviour(r.is_active()));
+    }
+    group.add(&picker);
+    group.add(&end);
+    group.add(&swap);
+    group.add(&minutes);
+    group.add(&per_preset);
+    page.add(&group);
 
     // ---- workspaces (X11 window managers only)
     if ctx.env.backend == crate::env::Backend::X11 {

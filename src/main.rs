@@ -5,6 +5,7 @@ mod autostart;
 mod blend;
 mod ctx;
 mod env;
+mod hotkeys;
 mod layer_host;
 mod mask_xf;
 mod manager;
@@ -95,9 +96,25 @@ fn main() -> glib::ExitCode {
         "Start without showing the manager window",
         None,
     );
-    app.connect_handle_local_options(|_, opts| {
+    app.add_main_option(
+        "preset",
+        glib::Char::from(b'p'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::String,
+        "Switch to the preset with this name (a desktop shortcut can run this)",
+        Some("NAME"),
+    );
+    app.connect_handle_local_options(|app, opts| {
         if opts.contains("background") {
             BACKGROUND.store(true, Ordering::Relaxed);
+        }
+        if let Ok(Some(name)) = opts.lookup::<String>("preset") {
+            if app.register(gio::Cancellable::NONE).is_ok() {
+                app.activate_action("activate-preset", Some(&name.to_variant()));
+                if app.is_remote() {
+                    return std::ops::ControlFlow::Break(glib::ExitCode::SUCCESS); // the running copy does the work
+                }
+            }
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -145,6 +162,20 @@ fn main() -> glib::ExitCode {
             });
             app.add_action(&quit);
             app.set_accels_for_action("app.quit", &["<Primary>q"]);
+
+            // Hotkeys and `gifdeck --preset NAME` land here.
+            let switch = gio::SimpleAction::new("activate-preset", Some(glib::VariantTy::STRING));
+            switch.connect_activate({
+                let ctx = Rc::downgrade(&ctx);
+                move |_, name| {
+                    if let (Some(ctx), Some(name)) = (ctx.upgrade(), name.and_then(|v| v.str())) {
+                        ctx.activate_by_name(name);
+                    }
+                }
+            });
+            app.add_action(&switch);
+            ctx.init_hotkeys();
+            ctx.sync_hotkeys();
 
             // Show the widgets of the active preset (or of the scheduled one).
             ctx.flush();
