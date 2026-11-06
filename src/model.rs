@@ -384,9 +384,9 @@ choice! {
     /// What happens when a scheduled preset ends and no rule follows it.
     EndAction {
         #[default]
-        LeaveOn => "Leave the preset on",
-        Random => "Switch to a random preset",
-        TurnOff => "Turn all widgets off",
+        LeaveOn => "Leave it on",
+        Random => "Random preset",
+        TurnOff => "Turn widgets off",
     }
 }
 
@@ -394,9 +394,9 @@ choice! {
     /// What happens when the user swaps presets while a schedule is in force.
     SwapMode {
         #[default]
-        Free => "Free: the swap stays until the schedule moves on",
-        Timer => "Timer: go back to the schedule after a while",
-        Lock => "Lock: the schedule cannot be swapped away",
+        Free => "Free",
+        Timer => "Timer",
+        Lock => "Lock",
     }
 }
 
@@ -405,8 +405,8 @@ choice! {
     TimePicker {
         #[default]
         Spin => "Number boxes",
-        Analog => "Analog clock (sweep an arc)",
-        Digital => "Digital clock (drag the numbers)",
+        Analog => "Analog clock",
+        Digital => "Digital clock",
     }
 }
 

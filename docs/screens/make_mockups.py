@@ -15,7 +15,8 @@ def arc(cx, cy, r, a, b):
     return f"M {x1:.1f} {y1:.1f} A {r} {r} 0 {int(b - a > 360)} 1 {x2:.1f} {y2:.1f}"
 
 def dial(cx, cy, title, own, others, color, labels=("12", "3", "6", "9"), caption="", pm=False):
-    s = f'<text x="{cx}" y="{cy-98}" text-anchor="middle" font-size="15" font-weight="bold" fill="{FG}">{title}</text>'
+    name, times = title.split(" (")
+    s = f'<text x="{cx-90}" y="{cy-92}" font-size="15" font-weight="bold" fill="{FG}">{name}</text>'
     s += f'<circle cx="{cx}" cy="{cy}" r="70" fill="{FG}" fill-opacity=".06" stroke="{FG}" stroke-opacity=".35"/>'
     for i in range(12):
         (x1, y1), (x2, y2) = pt(cx, cy, 70 - (9 if i % 3 == 0 else 5), i * 60), pt(cx, cy, 70, i * 60)
@@ -29,9 +30,11 @@ def dial(cx, cy, title, own, others, color, labels=("12", "3", "6", "9"), captio
     x1, y1 = pt(cx, cy, 70, a)
     s += f'<path d="M {cx} {cy} L {x1:.1f} {y1:.1f} A 70 70 0 {int(b - a > 360)} 1 {pt(cx, cy, 70, b)[0]:.1f} {pt(cx, cy, 70, b)[1]:.1f} Z" fill="{color}" fill-opacity=".28"/>'
     s += f'<path d="{arc(cx, cy, 68.5, a, b)}" stroke="{color}" stroke-width="4" fill="none"/>'
-    for dx, t, on in ((-52, "AM", not pm), (-2, "PM", pm)):
-        s += f'<rect x="{cx+dx}" y="{cy+88}" width="50" height="26" rx="6" fill="{BLUE if on else FG}" fill-opacity="{.9 if on else .1}"/><text x="{cx+dx+25}" y="{cy+106}" text-anchor="middle" font-size="13" fill="{"#fff" if on else FG}">{t}</text>'
-    s += f'<text x="{cx}" y="{cy+136}" text-anchor="middle" font-size="14" font-weight="bold" fill="{color}">{caption}</text>'
+    s += f'<text x="{cx+85}" y="{cy-26}" font-size="15" font-weight="bold" fill="{color}">{times.rstrip(")")}</text>'
+    for dx, t, on in ((0, "AM", not pm), (50, "PM", pm)):
+        s += f'<rect x="{cx+85+dx}" y="{cy-10}" width="50" height="26" rx="6" fill="{BLUE if on else FG}" fill-opacity="{.9 if on else .1}"/><text x="{cx+110+dx}" y="{cy+8}" text-anchor="middle" font-size="13" fill="{"#fff" if on else FG}">{t}</text>'
+    s += f'<text x="{cx+85}" y="{cy+38}" font-size="12" fill="{FG}" fill-opacity=".6">Press, hold and sweep</text>'
+    s += f'<text x="{cx+85}" y="{cy+56}" font-size="12" fill="{color}">{caption}</text>'
     return s
 
 def svg(w, h, body):
@@ -44,19 +47,19 @@ def card(x, y, w, h):
 # --- analog: "Morning" 9:00-12:00 is alone (blue), "Work" 11:00-5:00 PM overlaps it
 def analog():
     b = f'<text x="450" y="38" text-anchor="middle" font-size="19" font-weight="bold" fill="{FG}">Analog clock: press, hold and sweep</text>'
-    b += card(30, 60, 400, 340) + card(470, 60, 400, 340)
+    b += card(30, 60, 400, 260) + card(470, 60, 400, 260)
     # left: rule A being edited. B overlaps -> grey/red outside
-    b += dial(230, 200, "Morning (9:00 AM – 11:30 AM)", (540, 690), [(660, 720, RED)], RED, caption="overlaps “Work”")
-    b += dial(670, 200, "Work (11:00 AM – 5:00 PM)", (660, 720), [(540, 690, RED)], RED, caption="overlaps “Morning”")
-    b += f'<text x="450" y="425" text-anchor="middle" font-size="14" fill="{FG}">Overlapping rules show the other one as a ring and both turn red. Without an overlap: grey ring, blue arc.</text>'
-    return svg(900, 450, b)
+    b += dial(130, 200, "Morning (9:00 AM – 11:30 AM)", (540, 690), [(660, 720, RED)], RED, caption="overlaps “Work”")
+    b += dial(570, 200, "Work (11:00 AM – 5:00 PM)", (660, 720), [(540, 690, RED)], RED, caption="overlaps “Morning”")
+    b += f'<text x="450" y="345" text-anchor="middle" font-size="14" fill="{FG}">Overlapping rules show the other one as a ring and both turn red. Without an overlap: grey ring, blue arc.</text>'
+    return svg(900, 370, b)
 
 def analog_ok():
     b = f'<text x="450" y="38" text-anchor="middle" font-size="19" font-weight="bold" fill="{FG}">Analog clock: no clash (grey ring = another rule of the same preset)</text>'
-    b += card(30, 60, 400, 340) + card(470, 60, 400, 340)
-    b += dial(230, 200, "Morning (9:00 AM – 11:30 AM)", (540, 690), [(600, 720, GREY)], BLUE, caption="overlaps only its own preset")
-    b += dial(670, 200, "Evening (6:00 PM – 10:00 PM)", (360, 600), [], BLUE, caption="free", pm=True)
-    return svg(900, 450, b)
+    b += card(30, 60, 400, 260) + card(470, 60, 400, 260)
+    b += dial(130, 200, "Morning (9:00 AM – 11:30 AM)", (540, 690), [(600, 720, GREY)], BLUE, caption="overlaps only its own preset")
+    b += dial(570, 200, "Evening (6:00 PM – 10:00 PM)", (360, 600), [], BLUE, caption="free", pm=True)
+    return svg(900, 370, b)
 
 def digital():
     def t(x, y, text, c, hl_min=False):

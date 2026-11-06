@@ -218,7 +218,7 @@ pub fn analog(ctx: &Rc<AppCtx>, rule: &Rule, h24: bool, edit: Edit) -> (gtk::Box
         });
     }
 
-    let summary = gtk::Label::builder().css_classes(["gifdeck-digital"]).halign(gtk::Align::Center).build();
+    let summary = gtk::Label::builder().css_classes(["gifdeck-digital"]).halign(gtk::Align::Start).build();
     let show = {
         let summary = summary.clone();
         move |s: u16, e: u16| summary.set_text(&format!("{} – {}", fmt_time(s, h24), fmt_time(e, h24)))
@@ -238,7 +238,7 @@ pub fn analog(ctx: &Rc<AppCtx>, rule: &Rule, h24: bool, edit: Edit) -> (gtk::Box
             }
         });
     }
-    let halves = gtk::Box::builder().css_classes(["linked"]).halign(gtk::Align::Center).build();
+    let halves = gtk::Box::builder().css_classes(["linked"]).halign(gtk::Align::Start).build();
     halves.append(&am);
     halves.append(&pm);
 
@@ -296,10 +296,15 @@ pub fn analog(ctx: &Rc<AppCtx>, rule: &Rule, h24: bool, edit: Edit) -> (gtk::Box
     }
     area.add_controller(drag);
 
-    let b = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).valign(gtk::Align::Center).tooltip_text("Press where the window starts, hold and sweep clockwise or counter-clockwise to where it ends").build();
+    // dial on the left; times, half-day buttons and a hint stacked on the right
+    let hint = gtk::Label::builder().label("Press, hold and sweep the dial").wrap(true).max_width_chars(16).xalign(0.0).css_classes(["dim-label", "caption"]).build();
+    let side = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).valign(gtk::Align::Center).build();
+    side.append(&summary);
+    side.append(&halves);
+    side.append(&hint);
+    let b = gtk::Box::builder().spacing(12).valign(gtk::Align::Center).tooltip_text("Press where the window starts, hold and sweep clockwise or counter-clockwise to where it ends").build();
     b.append(&area);
-    b.append(&halves);
-    b.append(&summary);
+    b.append(&side);
     (b, area)
 }
 

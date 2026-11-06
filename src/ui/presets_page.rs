@@ -136,7 +136,7 @@ fn hotkey_button(ctx: &Rc<AppCtx>, id: &str, current: Option<&str>) -> gtk::Butt
 /// Gear with this preset's own end / swap behaviour; only shown while the setting is per preset.
 fn behaviour_button(ctx: &Rc<AppCtx>, p: &Preset) -> gtk::MenuButton {
     fn dropdown(labels: Vec<&str>, current: Option<u32>) -> gtk::DropDown {
-        let mut all = vec!["Use the global setting"];
+        let mut all = vec!["Global setting"];
         all.extend(labels);
         let d = gtk::DropDown::from_strings(&all);
         d.set_selected(current.map_or(0, |i| i + 1));
@@ -396,7 +396,8 @@ impl PresetsPage {
         let ctx = self.ctx.clone();
         let id = rule.id.clone();
         let h24 = ctx.state.borrow().time_24h;
-        let wrap = super::wrap_row(8);
+        let wrap = super::wrap_row(6);
+        let time_line = super::wrap_row(2);
         let edit = {
             let (ctx, id) = (ctx.clone(), id.clone());
             Rc::new(move |f: Box<dyn FnOnce(&mut Rule)>| ctx.edit_rule(&id, f)) as super::clock::Edit
@@ -470,8 +471,8 @@ impl PresetsPage {
                 }
             });
         }
-        wrap.append(&all_day);
-        wrap.append(&window);
+        time_line.append(&all_day);
+        time_line.append(&window);
 
         // "Only if application is open"
         let only_open = gtk::CheckButton::builder().label("Only if application is open").active(rule.only_if_open).valign(gtk::Align::Center).build();
@@ -527,6 +528,7 @@ impl PresetsPage {
         }
         let stack = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_bottom(6).build();
         stack.append(&wrap);
+        stack.append(&time_line);
         stack.append(&gate_line);
         let row = gtk::ListBoxRow::builder().activatable(false).child(&stack).build();
         self.marks.borrow_mut().push(RuleMarks {

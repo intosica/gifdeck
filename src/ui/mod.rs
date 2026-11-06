@@ -305,21 +305,25 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
         let st = ctx.state.borrow();
         ((st.time_picker, st.end_action, st.swap_mode, st.per_preset_behaviour), st.swap_minutes)
     };
-    let group = adw::PreferencesGroup::builder().title("Schedule").description("How preset schedules are entered, and what happens at their edges.").build();
-    let combo = |title: &str, subtitle: &str, labels: Vec<&str>, selected: u32| {
-        adw::ComboRow::builder().title(title).subtitle(subtitle).model(&gtk::StringList::new(&labels)).selected(selected).build()
+    let group = adw::PreferencesGroup::builder()
+        .title("Schedule")
+        .description("Free: a swap stays until the schedule moves on. Timer: the schedule takes over again after a while. Lock: a scheduled preset cannot be swapped away.")
+        .build();
+    // Short choices, shown under the title (use_subtitle): a value beside the title gets squeezed into "…" in a narrow window.
+    let combo = |title: &str, labels: Vec<&str>, selected: u32| {
+        adw::ComboRow::builder().title(title).use_subtitle(true).model(&gtk::StringList::new(&labels)).selected(selected).build()
     };
-    let picker = combo("Time selection", "Spin boxes, an analog clock you sweep with the mouse, or a digital clock you drag up and down.", TimePicker::labels(), ts.0.index());
+    let picker = combo("Time selection", TimePicker::labels(), ts.0.index());
     {
         let ctx = ctx.clone();
         picker.connect_selected_notify(move |r| ctx.set_time_picker(TimePicker::from_index(r.selected())));
     }
-    let end = combo("When a scheduled preset ends", "Nothing is scheduled after it.", EndAction::labels(), ts.1.index());
+    let end = combo("When a scheduled preset ends", EndAction::labels(), ts.1.index());
     {
         let ctx = ctx.clone();
         end.connect_selected_notify(move |r| ctx.set_end_action(EndAction::from_index(r.selected())));
     }
-    let swap = combo("When I switch preset during a schedule", "Applies to the radio buttons, the dropdown and hotkeys.", SwapMode::labels(), ts.2.index());
+    let swap = combo("When I switch preset during a schedule", SwapMode::labels(), ts.2.index());
     let minutes = adw::SpinRow::builder().title("Timer length").subtitle("Minutes before the schedule takes over again").adjustment(&gtk::Adjustment::new(f64::from(ds), 1.0, 1440.0, 5.0, 30.0, 0.0)).build();
     minutes.set_visible(ts.2 == SwapMode::Timer);
     {
@@ -370,6 +374,7 @@ fn settings_page(ctx: &Rc<AppCtx>) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     let files = adw::PreferencesGroup::builder().title("Files").description("Applies to GIFs, PNGs, WebPs, widget folders and masks you add.").build();
     let storage = adw::ComboRow::builder()
         .title("When adding files")
+        .use_subtitle(true)
         .model(&gtk::StringList::new(&Storage::ALL.map(|s| s.label())))
         .selected(ctx.state.borrow().storage.index())
         .build();
